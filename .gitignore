@@ -1,4 +1,4 @@
-﻿# Python
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
@@ -49,7 +49,6 @@ cash_bids_testeroonie.py
 cash_bids_testing.py
 cash_bids_via_playwright_laptop.py
 cash_bids_via_playwright_laptop_test.py
-cash_bids_via_playwright_UPDATED.py
 compute_posted_bid_UPDATED.py
-run_cash_bids_playwright_logged.ps1
+
 
