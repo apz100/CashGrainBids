@@ -1,28 +1,13 @@
-# \\DERKS-SERVER\Current\Adam\Code\CashGrainBids\run_cash_bids.ps1
 $ErrorActionPreference = 'Stop'
 
-# UNC root we use from workstations:
-$uncRoot = '\\DERKS-SERVER\Current\Adam\Code\CashGrainBids'
-
-function Use-LocalPathIfServer($unc) {
-  if ($env:COMPUTERNAME -ieq 'DERKS-SERVER') {
-    $m = [regex]::Match($unc, '^(\\\\DERKS-SERVER)\\([^\\]+)\\(.*)$')
-    if ($m.Success) {
-      $share = $m.Groups[2].Value   # e.g. 'Current'
-      $rest  = $m.Groups[3].Value   # e.g. 'Adam\Code\CashGrainBids'
-      try {
-        $shareObj = Get-SmbShare -Name $share -ErrorAction Stop
-        return Join-Path $shareObj.Path $rest
-      } catch { }
-    }
-  }
-  return $unc
-}
-
-$root   = Use-LocalPathIfServer $uncRoot
+$root   = Split-Path -Parent $MyInvocation.MyCommand.Path
 $python = Join-Path $root '.venv\Scripts\python.exe'
-$script = Join-Path $root 'cash_bids_via_playwright.py'
+$script = Join-Path $root 'cash_bids_via_playwright_UPDATED.py'
 $logs   = Join-Path $root 'logs'
+
+if (-not (Test-Path -LiteralPath $python)) {
+  throw "Virtual environment not found at $python. Run setup_new_computer.ps1 first."
+}
 
 # Keep Playwright browsers under the project (works for any account)
 $env:PLAYWRIGHT_BROWSERS_PATH = Join-Path $root 'pw-browsers'

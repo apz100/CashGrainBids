@@ -1,6 +1,6 @@
-# Run these in an elevated PowerShell on DERKS-SERVER (or remotely with admin rights)
+# Register this from a normal PowerShell. The task runs as the current user.
 $taskName = 'cash_bids_runner'
-$script   = '\\DERKS-SERVER\Current\Adam\Code\CashGrainBids\run_cash_bids.ps1'
+$script   = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'run_cash_bids.ps1'
 $ps       = (Get-Command powershell.exe).Source
 
 # Remove old task if present
@@ -9,10 +9,11 @@ Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction Silent
 $action   = New-ScheduledTaskAction `
   -Execute $ps `
   -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$script`"" `
-  -WorkingDirectory '\\DERKS-SERVER\Current\Adam\Code\CashGrainBids'
+  -WorkingDirectory (Split-Path -Parent $script)
 
 $trigger  = New-ScheduledTaskTrigger -Daily -At 06:30
-$principal= New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+$userId   = "$env:USERDOMAIN\$env:USERNAME"
+$principal= New-ScheduledTaskPrincipal -UserId $userId -LogonType Interactive -RunLevel Limited
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable `
              -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
              -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 5)

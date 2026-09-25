@@ -1,7 +1,7 @@
 $ErrorActionPreference = "Stop"
 
-$root   = "\\DERKS-SERVER\Current\Adam\Code\CashGrainBids"
-$logDir = "C:\Temp"
+$root   = Split-Path -Parent $MyInvocation.MyCommand.Path
+$logDir = Join-Path $root "logs"
 New-Item -ItemType Directory -Path $logDir -Force | Out-Null
 
 $logFile = Join-Path $logDir ("cashbids_" + (Get-Date -Format "yyyy-MM-dd_HHmmss") + ".log")
@@ -15,7 +15,6 @@ Write-Host "Computer: $env:COMPUTERNAME"
 Write-Host "Pwd: $(Get-Location)"
 Write-Host "Python: $py"
 Write-Host "Script exists: $(Test-Path $script)"
-Write-Host "JSON exists: $(Test-Path "\\DERKS-SERVER\Current\Adam\Code\derks-elevator-bids-2c0a610dd373.json")"
 Write-Host "==================="
 
 "=== START $(Get-Date) ===" | Out-File -FilePath $logFile -Encoding utf8

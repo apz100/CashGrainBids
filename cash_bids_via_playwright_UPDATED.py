@@ -2,10 +2,7 @@
 # Renders each AgriCharts page in headless Chromium and exports:
 # Name | Delivery | Delivery End | Futures Month | Futures Price | Change | Basis | (Bushel Cash Price | MT Cash Price)
 # + Location
-# Writes daily CSV to the first available of:
-#   P:\Adam\Code\CashGrainBids\output
-#   \\DERKS-SERVER\Current\Adam\Code\CashGrainBids\output
-#   <folder next to this script>\output
+# Writes daily CSV under the folder next to this script.
 
 from pathlib import Path
 from datetime import datetime
@@ -18,8 +15,6 @@ from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 import datetime as _dt
 import re as _re
-from compute_posted_bid import compute_posted_bid_from_cashbids_csv, BidParams
-from infer_crop_buckets import infer_old_new_crop_specs
 
 
 # --- bushel → metric tonne conversion factors
@@ -91,11 +86,7 @@ TARGETS: List[Dict] = [
 ]
 
 # ---------- ROBUST OUTPUT DIR ----------
-CANDIDATES = [
-    Path(r"P:\Adam\Code\CashGrainBids\EasternOntarioBids"),
-    Path(r"\\DERKS-SERVER\Current\Adam\Code\CashGrainBids\EasternOntarioBids"),
-    Path(__file__).resolve().parent / "EasternOntarioBids",
-]
+CANDIDATES = [Path(__file__).resolve().parent / "EasternOntarioBids"]
 
 OUTPUT_DIR = None
 last_err = None
@@ -523,138 +514,7 @@ def main():
     except Exception:
         pass
     return out_path
-# ----------------------------
-# POSTED BID CALCULATION (auto old/new crop)
-# ----------------------------
-
 if __name__ == "__main__":
-    out_path = main()
-    if out_path is None:
-        # nothing collected; exit gracefully
-        raise SystemExit(0)
-
-    posted_dir = OUTPUT_DIR / "PostedBids"
-    posted_dir.mkdir(parents=True, exist_ok=True)
-    print("POSTED DIR:", posted_dir)
-
-    # Locations you want EXCLUDED from competitor anchor (used as resale destinations)
-    CORN_EXCLUDE = ["Cardinal Corn", "Johnstown Corn", "Prescott Corn"]
-    SOY_EXCLUDE  = ["Prescott Soybeans"]
-
-    # Infer rolling "Old Crop" and "New Crop" buckets from today's CSV
-    df_today = pd.read_csv(out_path)
-
-    corn_specs = infer_old_new_crop_specs(df_today, commodity="Corn", exclude_locations=CORN_EXCLUDE)
-    soy_specs  = infer_old_new_crop_specs(df_today, commodity="Soybeans", exclude_locations=SOY_EXCLUDE)
-
-    params = BidParams(
-        target_discount_cad_mt=7.5,
-        discount_min_cad_mt=5.0,
-        discount_max_cad_mt=10.0,
-        trim_percent=0.20,
-        max_move_up_cad_mt=3.0,
-        max_move_down_cad_mt=5.0,
-    )
-
-    rows = []
-
-    def _calc_one(*, commodity: str, notes: str, spec: dict, exclude_locs: list[str], out_file: str):
-        r = compute_posted_bid_from_cashbids_csv(
-            csv_path=out_path,
-            commodity=commodity,
-            delivery=spec.get("delivery"),
-            futures_month=spec.get("futures_month"),
-            params=params,
-            exclude_locations=exclude_locs,
-            output_csv=posted_dir / out_file,
-        )
-        # Fill Notes for Wix (function doesn't accept notes kwarg)
-        r["Notes"] = notes
-        # Set our elevator/location name for the posted bid rows
-        r["Location"] = f"Derks {commodity}"
-        # Ensure Name is the commodity (e.g., 'Corn' / 'Soybeans')
-        r["Name"] = commodity
-        rows.append(r)
-        print(f"{commodity.upper()} {notes}: delivery={spec.get('delivery')} fut={spec.get('futures_month')} -> {r}")
-
-    # CORN
-    _calc_one(commodity="Corn", notes="Old Crop", spec=corn_specs["old"], exclude_locs=CORN_EXCLUDE, out_file="corn_old_latest.csv")
-    _calc_one(commodity="Corn", notes="New Crop", spec=corn_specs["new"], exclude_locs=CORN_EXCLUDE, out_file="corn_new_latest.csv")
-
-    # SOYBEANS
-    _calc_one(commodity="Soybeans", notes="Old Crop", spec=soy_specs["old"], exclude_locs=SOY_EXCLUDE, out_file="soy_old_latest.csv")
-    _calc_one(commodity="Soybeans", notes="New Crop", spec=soy_specs["new"], exclude_locs=SOY_EXCLUDE, out_file="soy_new_latest.csv")
-
-    # Wix file: match the source CSV column layout so downstream tools expect
-    # the same schema. Each posted bid (front/deferred) is a separate row.
-    wix_cols = [
-        "Commodity",                 # or "Name" if you didn't rename it
-        "Delivery",
-        "Futures Month",
-        "Futures Price",
-        "Change",
-        "Basis (CAD/BU)",            # or "Basis" depending on what your CSV has
-        "Cash Price (Bushels)",
-        "Cash Price (Tonnes)",
-        "Notes",
-    ]
-
-    # Ensure missing keys don't error when selecting columns
-    # Normalize rows so the expected 'Basis' column is present and tidy futures
-    for r in rows:
-        if "Basis" not in r and "Basis (CAD/BU)" in r:
-            r["Basis"] = r.get("Basis (CAD/BU)", "")
-        # remove newlines in Futures Price (some scrapes include linebreaks)
-        if "Futures Price" in r and isinstance(r["Futures Price"], str):
-            r["Futures Price"] = r["Futures Price"].replace("\n", "-").strip()
-    
-    df_wix = pd.DataFrame(rows)
-
-    # RENAME FIRST
-    df_wix = df_wix.rename(columns={
-        "Bushel Cash Price": "Cash Price (Bushels)",
-        "MT Cash Price": "Cash Price (Tonnes)",
-        "Name": "Commodity",
-    })
-
-    # If both old+new exist, drop old (safety)
-    for old in ["Bushel Cash Price", "MT Cash Price", "Name"]:
-        if old in df_wix.columns:
-            df_wix = df_wix.drop(columns=[old])
-
-# ---- PUSH TO GOOGLE SHEETS (do it here, no subprocess) ----
-SERVICE_ACCOUNT_JSON = r"\\DERKS-SERVER\Current\Adam\Code\derks-elevator-bids-2c0a610dd373.json"
-SHEET_ID = "1u6sqQdT0r6rgrUR-Fg-D6brK3K7GcbC3lZ2TbS6GWUo"
-TAB_NAME = "WIX_BIDS"
-
-try:
-    import gspread
-    from google.oauth2.service_account import Credentials
-    from gspread_dataframe import set_with_dataframe
-
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive",
-    ]
-
-    creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_JSON, scopes=scopes)
-    gc = gspread.authorize(creds)
-    sh = gc.open_by_key(SHEET_ID)
-
-    try:
-        ws = sh.worksheet(TAB_NAME)
-    except Exception:
-        ws = sh.add_worksheet(title=TAB_NAME, rows="200", cols="20")
-
-    ws.clear()
-    set_with_dataframe(ws, df_wix[wix_cols], include_index=False, include_column_header=True, resize=True)
-    print(f"Google Sheets updated: sheet={SHEET_ID} tab={TAB_NAME}")
-
-except Exception as e:
-    print("Google Sheets update FAILED:", repr(e))
-
-
-
-
+    main()
 
 
