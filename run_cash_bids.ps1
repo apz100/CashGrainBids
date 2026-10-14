@@ -3,6 +3,7 @@ $ErrorActionPreference = 'Stop'
 $root   = Split-Path -Parent $MyInvocation.MyCommand.Path
 $python = Join-Path $root '.venv\Scripts\python.exe'
 $script = Join-Path $root 'cash_bids_via_playwright_UPDATED.py'
+$report = Join-Path $root 'generate_daily_report.py'
 $logs   = Join-Path $root 'logs'
 
 if (-not (Test-Path -LiteralPath $python)) {
@@ -31,3 +32,9 @@ $ErrorActionPreference = $prevEAP
 Write-Host "Done. ExitCode=$code  Log: $log"
 Get-Content -Tail 80 $log
 if ($code -ne 0) { exit $code }
+
+Write-Host "Generating daily PDF report..."
+& $python $report *>> $log 2>&1
+$reportCode = $LASTEXITCODE
+Write-Host "Report exit code=$reportCode"
+if ($reportCode -ne 0) { exit $reportCode }

@@ -16,11 +16,22 @@ from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 import datetime as _dt
 import re as _re
 
+try:
+    from email_bid_sources import collect_outlook_bid_rows
+except Exception:
+    collect_outlook_bid_rows = None
+
 
 # --- bushel → metric tonne conversion factors
 SOY_BU_PER_MT   = 36.7437   # 1 metric tonne soybeans ≈ 36.7437 bu
 CORN_BU_PER_MT  = 39.3683   # 1 metric tonne corn     ≈ 39.3683 bu
 WHEAT_BU_PER_MT = 36.7437   # 1 metric tonne wheat    ≈ 36.7437 bu
+
+PROJECT_DIR = Path(__file__).resolve().parent
+INGREDION_URL = "https://ag.ingredion.com/cash-bids"
+GREENFIELD_URL = "https://ggi.marketplace.barchart.com/cash-bids"
+GREAT_LAKES_URL = "https://www.greatlakesgrain.com/cash-bids"
+INGREDION_STORAGE_STATE = PROJECT_DIR / "ingredion_storage_state.json"
 
 def add_mt_cash_price(df: pd.DataFrame) -> pd.DataFrame:
     """Rename Cash Price → Bushel Cash Price, then insert MT Cash Price right after."""
@@ -67,6 +78,9 @@ TARGETS: List[Dict] = [
     {"name": "Cardinal Corn",         "url": "https://fmn1.agricharts.com/markets/cash.php?location_filter=4193"},
     {"name": "Chesterville Corn",     "url": "https://fmn1.agricharts.com/markets/cash.php?location_filter=3371"},
     {"name": "Chesterville Soybeans", "url": "https://fmn1.agricharts.com/markets/cash.php?location_filter=3382"},
+    {"name": "Dalkeith Corn",         "url": "https://fmn1.agricharts.com/markets/cash.php?location_filter=85515"},
+    {"name": "Dalkeith Soybeans",     "url": "https://fmn1.agricharts.com/markets/cash.php?location_filter=85516"},
+    {"name": "Dalkeith Wheat",        "url": "https://fmn1.agricharts.com/markets/cash.php?location_filter=85517"},
     {"name": "Johnstown Corn",        "url": "https://fmn1.agricharts.com/markets/cash.php?location_filter=7568"},
     {"name": "Kars Corn",             "url": "https://fmn1.agricharts.com/markets/cash.php?location_filter=62198"},
     {"name": "Kars Soybeans",         "url": "https://fmn1.agricharts.com/markets/cash.php?location_filter=62199"},
@@ -87,6 +101,14 @@ TARGETS: List[Dict] = [
 
 # ---------- ROBUST OUTPUT DIR ----------
 CANDIDATES = [Path(__file__).resolve().parent / "EasternOntarioBids"]
+
+# Email bid sheets often contain several Ontario regions. Keep only the
+# locations that are useful for the Eastern Ontario comparison. Web sources
+# are already explicitly configured above and are not filtered here.
+EMAIL_LOCATION_ALLOWLIST = {
+    "andersons email bids": ("johnstown", "prescott", "picton terminal"),
+    "macewen email bids": ("prescott/cardinal/johnstown", "port prescott"),
+}
 
 OUTPUT_DIR = None
 last_err = None
@@ -293,6 +315,40 @@ def extract_table_to_df(table_html: str) -> pd.DataFrame:
     out = drop_spacer_rows(out)
     return out
 
+
+def filter_eastern_ontario_locations(df: pd.DataFrame) -> pd.DataFrame:
+    """Remove out-of-area email locations and known parser artifacts."""
+    if "Source" not in df.columns or "Location" not in df.columns:
+        return df
+    keep = pd.Series(True, index=df.index)
+    for source, allowed in EMAIL_LOCATION_ALLOWLIST.items():
+        source_mask = df["Source"].astype(str).str.strip().str.lower().eq(source)
+        location = df["Location"].astype(str).str.strip().str.lower()
+        source_keep = pd.Series(False, index=df.index)
+        for value in allowed:
+            source_keep |= location.str.contains(re.escape(value), regex=True, na=False)
+        keep &= ~source_mask | source_keep
+    removed = int((~keep).sum())
+    if removed:
+        print(f"[INFO] Removed {removed} out-of-area or malformed email bid rows")
+    return df.loc[keep].reset_index(drop=True)
+
+
+def normalize_agricharts_basis(df: pd.DataFrame) -> pd.DataFrame:
+    """AgriCharts publishes basis in cents; normalize 165 to CAD/bu 1.65."""
+    out = df.copy()
+    if "Source" not in out.columns or "Basis" not in out.columns:
+        return out
+    source = out["Source"].astype(str).str.strip().str.lower()
+    basis = pd.to_numeric(out["Basis"], errors="coerce")
+    cents_mask = source.eq("agricharts") & basis.abs().ge(10)
+    # Replace the whole column with a numeric series. Previous CSVs are read
+    # with string dtype, and assigning floats into a pandas string extension
+    # column raises a TypeError on newer pandas versions.
+    basis.loc[cents_mask] = basis.loc[cents_mask] / 100
+    out["Basis"] = basis
+    return out
+
 # ---------- BROWSER SCRAPE ----------
 def scrape_one(page, url: str) -> Optional[pd.DataFrame]:
     page.goto(url, wait_until="domcontentloaded", timeout=45000)
@@ -325,6 +381,201 @@ def scrape_one(page, url: str) -> Optional[pd.DataFrame]:
             continue
 
     return None
+
+
+def _table_after_heading(page, heading: str, required_text: tuple[str, ...] = (), timeout: int = 15000):
+    """Return the first following table containing the required header text."""
+    locator = page.get_by_text(heading, exact=True).first
+    locator.wait_for(state="visible", timeout=timeout)
+    tables = locator.locator("xpath=following::table")
+    deadline = time.time() + timeout / 1000
+    while time.time() < deadline:
+        for idx in range(tables.count()):
+            table = tables.nth(idx)
+            if not table.is_visible():
+                continue
+            text = table.inner_text(timeout=1000).lower()
+            if all(required.lower() in text for required in required_text):
+                return table
+        time.sleep(0.25)
+    raise PWTimeout(f"Could not find table after {heading} with headers {required_text}")
+
+
+def _parse_delivery_range(value: str) -> tuple[str, str]:
+    """Convert 11/01/26 - 11/30/26 into normalized delivery fields."""
+    parts = re.split(r"\s*-\s*", str(value), maxsplit=1)
+    parsed = []
+    for part in parts[:2]:
+        try:
+            parsed.append(pd.to_datetime(part).strftime("%b %Y"))
+        except Exception:
+            parsed.append(str(part).strip())
+    if len(parsed) == 1:
+        parsed.append(parsed[0])
+    return parsed[0], parsed[1]
+
+
+def scrape_greenfield_johnstown(page) -> Optional[pd.DataFrame]:
+    """Scrape only the Johnstown Corn table from Greenfield/Barchart."""
+    page.goto(GREENFIELD_URL, wait_until="domcontentloaded", timeout=45000)
+    table = _table_after_heading(page, "JOHNSTOWN")
+    df = tidy_df(pd.read_html(io.StringIO(table.evaluate("el => el.outerHTML")))[0])
+    df.columns = [str(c).strip() for c in df.columns]
+
+    rows = []
+    for _, row in df.iterrows():
+        delivery, delivery_end = _parse_delivery_range(row.get("Delivery", ""))
+        rows.append({
+            "Source": "Greenfield",
+            "Location": "Greenfield Johnstown Corn",
+            "Name": "Corn",
+            "Delivery": delivery,
+            "Delivery End": delivery_end,
+            "Futures Month": norm_full_month(row.get("Futures Month", "")),
+            "Futures Price": normalize_futures_price(row.get("Futures Price", "")),
+            "Change": normalize_change_value(row.get("Change", "")),
+            "Basis": row.get("Basis", ""),
+            "Bushel Cash Price": row.get("Price", ""),
+        })
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return None
+    out["Bushel Cash Price"] = pd.to_numeric(out["Bushel Cash Price"], errors="coerce")
+    out["Basis"] = pd.to_numeric(out["Basis"], errors="coerce")
+    return add_mt_cash_price(out)
+
+
+def scrape_ingredion_cardinal_cey_dent(page) -> Optional[pd.DataFrame]:
+    """Scrape only Ingredion's Cardinal / CEY Dent table."""
+    page.goto(INGREDION_URL, wait_until="domcontentloaded", timeout=45000)
+    if page.locator("input[type='password']").count() > 0:
+        print("[AUTH] Ingredion requires login; skipping Cardinal CEY Dent")
+        return None
+
+    section = page.get_by_text("CEY Dent", exact=True).first.locator(
+        "xpath=ancestor::div[contains(@class, 'cbCommodity')]"
+    )
+    section.wait_for(state="visible", timeout=15000)
+    row_locator = section.locator("ul[class*='fcControls1'], ul[class*='fcControls2']")
+    rows = []
+    for idx in range(row_locator.count()):
+        cells = [value.strip() for value in row_locator.nth(idx).locator("li").all_inner_texts()]
+        if len(cells) < 7:
+            continue
+        delivery, bid, basis, futures, change, futures_month, _last_trade = cells[:7]
+        mt_price = pd.to_numeric(bid.replace(",", ""), errors="coerce")
+        basis_mt = pd.to_numeric(basis.replace(",", ""), errors="coerce")
+        bu_price = mt_price / CORN_BU_PER_MT
+        basis_bu = basis_mt / CORN_BU_PER_MT
+        rows.append({
+            "Source": "Ingredion",
+            "Location": "Ingredion Cardinal CEY Dent",
+            "Name": "Corn",
+            "Delivery": norm_short_month(delivery),
+            "Delivery End": norm_short_month(delivery),
+            "Futures Month": norm_full_month(futures_month.replace(" Corn", "")),
+            "Futures Price": normalize_futures_price(re.sub(r"[sS]$", "", futures.strip())),
+            "Change": normalize_change_value(change),
+            # Ingredion reports Bid and Basis in CAD/MT; normalize Basis to CAD/bu.
+            "Basis": basis_bu,
+            "Bushel Cash Price": bu_price,
+        })
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return None
+    out["Basis"] = pd.to_numeric(out["Basis"], errors="coerce")
+    return add_mt_cash_price(out)
+
+
+def _futures_month_from_dtn_symbol(symbol: str) -> str:
+    """Convert DTN symbols such as @C6Z or @MW7U to a futures month."""
+    raw = re.sub(r"[^A-Za-z0-9]", "", str(symbol)).upper()
+    month_codes = {
+        "F": "January", "G": "February", "H": "March", "J": "April",
+        "K": "May", "M": "June", "N": "July", "Q": "August",
+        "U": "September", "V": "October", "X": "November", "Z": "December",
+    }
+    match = re.search(r"(\d)([FGHJKMNQUVXZ])$", raw)
+    if not match:
+        return str(symbol).strip()
+    year_digit, month_code = match.groups()
+    year = 2020 + int(year_digit)
+    return f"{month_codes[month_code]} {year}"
+
+
+def _parse_visible_number(value: object) -> float:
+    """Parse a displayed number while ignoring hidden HTML comments."""
+    text = re.sub(r"<!--.*?-->", "", str(value), flags=re.S)
+    match = re.search(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)", text.replace(",", ""))
+    return float(match.group()) if match else float("nan")
+
+
+def scrape_great_lakes_embrun(page) -> Optional[pd.DataFrame]:
+    """Scrape all visible elevator bids for Embrun from Great Lakes Grain."""
+    frame = None
+    last_error = None
+    for attempt in range(1, 4):
+        try:
+            page.goto(GREAT_LAKES_URL, wait_until="domcontentloaded", timeout=60000)
+            page.wait_for_timeout(2500 * attempt)
+            frame = next(
+                (fr for fr in page.frames if "cashbids.greatlakesgrain.com" in fr.url),
+                None,
+            )
+            if frame is not None:
+                break
+        except Exception as exc:
+            last_error = exc
+        if attempt < 3:
+            print(f"[WARN] Great Lakes frame not ready; retrying ({attempt}/3)")
+    if frame is None:
+        detail = f": {last_error}" if last_error else ""
+        raise RuntimeError(f"Great Lakes cash-bids frame was not found after 3 attempts{detail}")
+
+    location = frame.locator("select[name='Location']").first
+    location.wait_for(state="visible", timeout=15000)
+    location.select_option(label="Embrun Elevator")
+    frame.wait_for_timeout(1500)
+    location_id = location.input_value()
+    frame.goto(
+        f"https://cashbids.greatlakesgrain.com/index.cfm?show=11&mid=25"
+        f"&theLocation={location_id}&cmid=all&layout=19",
+        wait_until="networkidle",
+        timeout=60000,
+    )
+
+    commodity_names = ["Corn", "Soybeans", "SRW Wheat", "HR Spring Wheat", "HRW Wheat"]
+    tables = frame.locator("table[name='cashbids-data-table']")
+    if tables.count() == 0:
+        raise RuntimeError("Great Lakes Embrun page loaded, but no bid tables were found")
+    rows = []
+    for idx in range(tables.count()):
+        table_html = tables.nth(idx).evaluate("el => el.outerHTML")
+        df = tidy_df(pd.read_html(io.StringIO(table_html))[0])
+        commodity = commodity_names[idx] if idx < len(commodity_names) else "Unknown"
+        for _, row in df.iterrows():
+            delivery = norm_short_month(row.get("Delivery", ""))
+            rows.append({
+                "Source": "Great Lakes Grain",
+                "Location": "Great Lakes Embrun Elevator",
+                "Name": commodity,
+                "Delivery": delivery,
+                "Delivery End": delivery,
+                "Futures Month": _futures_month_from_dtn_symbol(row.get("Futures Mon.", "")),
+                "Futures Price": normalize_futures_price(
+                    str(row.get("Futures", "")).replace("'", "-")
+                ),
+                "Change": normalize_change_value(
+                    str(row.get("Chg", "")).replace("'", "-")
+                ),
+                "Basis": _parse_visible_number(row.get("Basis", "")),
+                "Bushel Cash Price": _parse_visible_number(row.get("Cash Price", "")),
+            })
+
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return None
+    return add_mt_cash_price(out)
 
 def excel_protect(s: str) -> str:
     if isinstance(s, str) and s and s[0] in ("=", "+", "-", "@"):
@@ -364,13 +615,14 @@ def _month_to_key(s: str) -> str:
     return f"{yr:04d}-{mm:02d}" if mm else s.lower()
 
 def _build_key(df: pd.DataFrame) -> pd.Series:
-    """Key = Location|Name|DeliveryKey|DeliveryEndKey|FutMonKey"""
+    """Key = Source|Location|Name|DeliveryKey|DeliveryEndKey|FutMonKey"""
+    source = df.get("Source", pd.Series("AgriCharts", index=df.index)).astype(str).str.strip().str.lower()
     loc = df.get("Location", "").astype(str).str.strip().str.lower()
     nam = df.get("Name", "").astype(str).str.strip().str.lower()
     d1  = df.get("Delivery", "").apply(_month_to_key)
     d2  = df.get("Delivery End", "").apply(_month_to_key)
     fm  = df.get("Futures Month", "").apply(_month_to_key)
-    return loc + "|" + nam + "|" + d1 + "|" + d2 + "|" + fm
+    return source + "|" + loc + "|" + nam + "|" + d1 + "|" + d2 + "|" + fm
 
 def _find_prev_output_file(fetch_date: str) -> Optional[Path]:
     """
@@ -406,6 +658,12 @@ def add_basis_change_column(today_df: pd.DataFrame, prev_csv_path: Path) -> pd.D
     for c in ["Location", "Name", "Delivery", "Delivery End", "Futures Month", "Basis"]:
         if c not in prev.columns:
             prev[c] = ""
+    if "Source" not in prev.columns:
+        prev["Source"] = "AgriCharts"
+
+    # Older files may contain AgriCharts basis as whole cents (165). Bring
+    # them to the same CAD/bu scale as today's normalized values.
+    prev = normalize_agricharts_basis(prev)
 
     # Numeric previous basis
     prev["Basis_num"] = pd.to_numeric(prev["Basis"], errors="coerce")
@@ -448,7 +706,11 @@ def main():
     rows = []
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
+        context_kwargs = {}
+        if INGREDION_STORAGE_STATE.is_file():
+            context_kwargs["storage_state"] = str(INGREDION_STORAGE_STATE)
         context = browser.new_context(
+            **context_kwargs,
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome Safari"
         )
         page = context.new_page()
@@ -461,7 +723,8 @@ def main():
                     print(f"[WARN] {name}: no rendered bids table found")
                     continue
 
-                df.insert(0, "Location", name)
+                df.insert(0, "Source", "AgriCharts")
+                df.insert(1, "Location", name)
                 df = add_mt_cash_price(df)
 
                 rows.append(df)
@@ -470,15 +733,44 @@ def main():
                 print(f"[ERR] {name}: {e}")
             time.sleep(0.5)
 
+        for source_name, collector in [
+            ("Greenfield Johnstown Corn", scrape_greenfield_johnstown),
+            ("Ingredion Cardinal CEY Dent", scrape_ingredion_cardinal_cey_dent),
+            ("Great Lakes Embrun Elevator", scrape_great_lakes_embrun),
+        ]:
+            try:
+                df = collector(page)
+                if df is None or df.empty:
+                    print(f"[WARN] {source_name}: no data collected")
+                    continue
+                rows.append(df)
+                print(f"[OK] {source_name}: {len(df)} rows")
+            except Exception as e:
+                print(f"[ERR] {source_name}: {e}")
+            time.sleep(0.5)
+
         context.close()
         browser.close()
 
+    # Classic Outlook runs in the signed-in Windows user's session. Email
+    # failures are non-fatal so a missing Outlook profile cannot stop web bids.
+    if collect_outlook_bid_rows is not None:
+        try:
+            email_rows = collect_outlook_bid_rows(PROJECT_DIR)
+            if email_rows is not None and not email_rows.empty:
+                rows.append(email_rows)
+                print(f"[OK] Outlook email bids: {len(email_rows)} rows")
+        except Exception as exc:
+            print(f"[ERR] Outlook email bids: {exc}")
+
     if not rows:
         print("No data collected.")
-        return None
+        return 1
 
     # IMPORTANT: don't fillna("") yet; we need numeric Basis for diff calc
     out = pd.concat(rows, ignore_index=True)
+    out = normalize_agricharts_basis(out)
+    out = filter_eastern_ontario_locations(out)
 
     # Compare to the most recent prior CSV (if any) and add 'Basis Change'
     prev_path = _find_prev_output_file(fetch_date)
@@ -495,7 +787,7 @@ def main():
 
     # Final column order (no Settlement; include Basis Change and Bushel/MT)
     base_cols = [
-        "Location", "Name", "Delivery", "Delivery End", "Futures Month",
+        "Source", "Location", "Name", "Delivery", "Delivery End", "Futures Month",
         "Futures Price", "Change", "Basis", "Basis Change", "Bushel Cash Price", "MT Cash Price"
     ]
     out = out[[c for c in base_cols if c in out.columns]]
@@ -503,18 +795,81 @@ def main():
     # Now it's safe to stringify empties for the CSV
     out = out.fillna("")
 
+    # Standardize numeric output to two decimal places.
+    # Keep futures/change values in their existing CBOT eighths format.
+    for col in ["Basis", "Basis Change", "Bushel Cash Price", "MT Cash Price"]:
+        if col not in out.columns:
+            continue
+        numeric = pd.to_numeric(
+            out[col].astype(str).str.replace(r"[^0-9.\-]", "", regex=True),
+            errors="coerce",
+        ).round(2)
+        out[col] = numeric.map(lambda value: f"{value:.2f}" if pd.notna(value) else "")
+
+    if "Bushel Cash Price" in out.columns:
+        out["Bushel Cash Price"] = out["Bushel Cash Price"].map(
+            lambda value: f"${value}" if value else ""
+        )
+
     # Prevent Excel from evaluating the Change strings like "+9-6" or "-0-2"
     if "Change" in out.columns:
         out["Change"] = out["Change"].astype(str).map(excel_protect)
 
     out.to_csv(out_path, index=False, header=True, quoting=csv.QUOTE_MINIMAL, encoding="utf-8")
     print(f"Wrote {len(out)} rows to {out_path}")
+
+    # Also write a real Excel workbook so Excel preserves two-decimal display.
+    xlsx_path = out_path.with_suffix(".xlsx")
+    try:
+        excel_out = out.copy()
+        for col in ["Basis", "Basis Change", "Bushel Cash Price", "MT Cash Price"]:
+            if col in excel_out.columns:
+                excel_out[col] = pd.to_numeric(
+                    excel_out[col].astype(str).str.replace(r"[^0-9.\-]", "", regex=True),
+                    errors="coerce",
+                )
+
+        with pd.ExcelWriter(xlsx_path, engine="openpyxl") as writer:
+            excel_out.to_excel(writer, index=False, sheet_name="Cash Bids")
+            sheet_names = {"AgriCharts": "AgriCharts", "Greenfield": "Greenfield",
+                           "Ingredion": "Ingredion", "Great Lakes Grain": "Great Lakes",
+                           "Andersons email bids": "Andersons Email",
+                           "MacEwen email bids": "MacEwen Email"}
+            for source, source_df in excel_out.groupby("Source", sort=False):
+                sheet_name = sheet_names.get(str(source), str(source)[:31])
+                source_df = source_df.dropna(axis=1, how="all")
+                source_df.to_excel(writer, index=False, sheet_name=sheet_name)
+
+            for worksheet in writer.book.worksheets:
+                worksheet.freeze_panes = "A2"
+                worksheet.auto_filter.ref = worksheet.dimensions
+                header_map = {cell.value: cell.column for cell in worksheet[1]}
+                for col in ["Basis", "Basis Change", "MT Cash Price"]:
+                    if col in header_map:
+                        for cell in worksheet.iter_cols(
+                            min_col=header_map[col], max_col=header_map[col], min_row=2
+                        ):
+                            for value_cell in cell:
+                                value_cell.number_format = "0.00"
+                if "Bushel Cash Price" in header_map:
+                    for cell in worksheet.iter_cols(
+                        min_col=header_map["Bushel Cash Price"],
+                        max_col=header_map["Bushel Cash Price"],
+                        min_row=2,
+                    ):
+                        for value_cell in cell:
+                            value_cell.number_format = "$0.00"
+
+        print(f"Wrote formatted Excel workbook to {xlsx_path}")
+    except Exception as e:
+        print(f"[WARN] Could not write Excel workbook: {e}")
+
     try:
         print(out.head(12).to_string(index=False))
     except Exception:
         pass
-    return out_path
+    return 0
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
 
 

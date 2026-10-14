@@ -11,7 +11,7 @@ $action   = New-ScheduledTaskAction `
   -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$script`"" `
   -WorkingDirectory (Split-Path -Parent $script)
 
-$trigger  = New-ScheduledTaskTrigger -Daily -At 06:30
+$trigger  = New-ScheduledTaskTrigger -Daily -At 07:30
 $userId   = "$env:USERDOMAIN\$env:USERNAME"
 $principal= New-ScheduledTaskPrincipal -UserId $userId -LogonType Interactive -RunLevel Limited
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable `

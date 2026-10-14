@@ -19,6 +19,7 @@ pw-browsers/
 
 # Generated bid outputs
 EasternOntarioBids/
+GoogleDriveExport/
 OntarioBids/
 PostedBids/
 testingBids/
@@ -30,6 +31,8 @@ logs/
 # Local secrets and environment files
 .env
 .env.*
+ingredion_storage_state.json
+ingredion_browser_profile/
 *.pem
 *.key
 *service-account*.json
