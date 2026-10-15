@@ -54,20 +54,41 @@ Log in in the browser window that opens, verify that the Cardinal / CEY Dent tab
 
 ## Outlook bid emails
 
-When classic Outlook is installed and signed in, the daily run also checks the
-Inbox for the newest recurring MacEwen, Andersons, Richard, and Bunge bid
-emails and adds their rows to the CSV and Excel files. Bunge is matched by
-sender (`jose.borunda@bunge.com`) rather than subject and its text basis rows
-are recorded without inventing cash prices. BroadGrain bid sheets are embedded images, so
-the run saves their inline image attachment under `logs/` for OCR processing;
-it does not guess prices from an image. The scheduled task must run while the
-Windows user is signed in and Outlook is available. Email errors do not stop
-the website bids from being written.
+When classic Outlook is installed and signed in, the daily run scans the Inbox
+and its subfolders for the newest recurring bid emails from MacEwen, Andersons,
+BroadGrain, Richardson, P&H, and Bunge, then adds validated rows to the CSV and
+Excel files. Sender matching is deliberate: Dylan Stewart is BroadGrain,
+Andrea Baron Mancera is Richardson, Richard Kricsfalusy is P&H, and Bunge is
+matched by `jose.borunda@bunge.com` rather than subject.
 
-BroadGrain OCR also requires the Tesseract OCR application installed on
-Windows. `Pillow` and `pytesseract` are included in the Python requirements;
-the first OCR test saves recognized text under `logs/` for verification rather
-than importing unverified prices into the workbook.
+BroadGrain, Richardson, and P&H send their bid tables as inline images rather
+than usable HTML tables. Their image attachments are therefore read with OCR.
+Only complete rows with the expected numeric values are imported; unclear,
+partial, and error rows are left out instead of being guessed. The raw OCR text
+and source images are retained under `logs/` for review. The scheduled task
+must run while the Windows user is signed in and classic Outlook is available.
+An email-source failure does not stop website bids from being written.
+
+This OCR path requires the Tesseract OCR application installed on Windows.
+`Pillow` and `pytesseract` are included in the Python requirements. Confirm
+each source using `logs/email_pull_YYYY-MM-DD.txt`: `[SUCCESS]` includes the
+number of imported rows, while `[FAILURE]` explains why no rows were added.
+
+`Basis` is the source's CAD basis when supplied. `US Basis (USD/bu)` is a
+separate column for exporter and processor comparisons: it is read directly
+from Richardson and P&H sheets and from Bunge's USD basis email. Sources that
+do not provide a USD basis or the FX value required to calculate one are left
+blank rather than converted with an assumption.
+
+The daily run also retrieves the Bank of Canada `FXUSDCAD` spot observation,
+caches it under `EasternOntarioBids/FX/`, converts it to CADUSD, and calculates
+USD basis for BroadGrain, Andersons, MacEwen, Ingredion, and Greenfield when
+both CAD cash and futures values are present. The public workbook keeps only
+the `US Basis (USD/bu)` result; FX details remain internal. Printed USD basis
+values are preserved. Values outside the valid +/-2.00 USD/bu range are
+rejected and logged. MacEwen's current email format supplies MT cash and a
+delivery month but no futures price, so its USD basis remains blank until a
+matching futures value is added.
 
 ## Regression tests
 
@@ -82,4 +103,27 @@ older CSV files, and the Eastern Ontario email-location filter.
 
 Email results are recorded in both the normal `logs/run_YYYY-MM-DD_HHmm.log`
 file and `logs/email_pull_YYYY-MM-DD.txt`. Look for `[SUCCESS]`, `[NO MATCH]`,
-`[FAILURE]`, or `[OCR REVIEW ONLY]` beside each email source.
+or `[FAILURE]` beside each email source.
+
+## Project structure
+
+The scheduled task still starts `cash_bids_via_playwright_UPDATED.py`; it is
+now a compatibility entry point only. The application code is organized under
+`cashgrainbids`:
+
+- `config.py` — source URLs, AgriCharts locations, output paths, and email
+  location rules.
+- `processing.py` — shared cleaning, basis conversion, validation, sorting,
+  and prior-day basis comparison.
+- `web_collectors.py` — the website-specific Greenfield, Ingredion, Great
+  Lakes, and AgriCharts collectors.
+- `output.py` — standard CSV and Excel workbook writing.
+- `classification.py` — elevator, processor, exporter, and direct-ship
+  competitor categorization.
+- `reporting.py` — PDF/HTML report generation and Google Drive Desktop export.
+- `pipeline.py` — the small orchestration layer that runs the daily flow.
+
+Email parsing remains in `email_bid_sources.py` because each company has its
+own email format. Add a new website collector in `web_collectors.py`, a new
+recurring email parser in `email_bid_sources.py`, and put locations or rules
+in `config.py`. This keeps new sources from expanding the daily pipeline.
