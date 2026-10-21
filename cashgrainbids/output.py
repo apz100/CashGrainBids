@@ -44,6 +44,7 @@ def write_daily_outputs(df: pd.DataFrame, csv_path: Path) -> tuple[Path, Path]:
         "Great Lakes Grain": "Great Lakes", "Andersons email bids": "Andersons Email",
         "MacEwen email bids": "MacEwen Email", "Bunge email bids": "Bunge Email",
         "Richard email bids": "Richard Email",
+        "Ceresco bids": "Ceresco",
     }
     with pd.ExcelWriter(xlsx_path, engine="openpyxl") as writer:
         excel_out.to_excel(writer, index=False, sheet_name="Cash Bids")

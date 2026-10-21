@@ -11,12 +11,16 @@ $action   = New-ScheduledTaskAction `
   -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$script`"" `
   -WorkingDirectory (Split-Path -Parent $script)
 
-$trigger  = New-ScheduledTaskTrigger -Daily -At 07:30
+# Run twice daily using the computer's local time zone (Eastern on this PC).
+$triggers = @(
+  (New-ScheduledTaskTrigger -Daily -At 07:30),
+  (New-ScheduledTaskTrigger -Daily -At 16:00)
+)
 $userId   = "$env:USERDOMAIN\$env:USERNAME"
 $principal= New-ScheduledTaskPrincipal -UserId $userId -LogonType Interactive -RunLevel Limited
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable `
              -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
              -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 5)
 
-Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger `
+Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $triggers `
   -Principal $principal -Settings $settings -Force

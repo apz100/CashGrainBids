@@ -55,5 +55,5 @@ EMAIL_LOCATION_ALLOWLIST = {
 OUTPUT_COLUMNS = (
     "Source", "Location", "Name", "Delivery", "Delivery End", "Futures Month",
     "Futures Price", "Change", "Basis", "Basis Change", "US Basis (USD/bu)", "US Basis Change",
-    "Bushel Cash Price", "MT Cash Price",
+    "Bushel Cash Price", "MT Cash Price", "Quote Date",
 )

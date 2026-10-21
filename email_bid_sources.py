@@ -33,6 +33,15 @@ def _text(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value).replace("\xa0", " ")).strip()
 
 
+def _email_quote_date(item: Any) -> str:
+    """Return the date the bid entered Outlook for display and stale checks."""
+    value = getattr(item, "ReceivedTime", None) or getattr(item, "SentOn", None)
+    try:
+        return pd.Timestamp(value).strftime("%Y-%m-%d")
+    except Exception:
+        return _text(value)[:10]
+
+
 def _number(value: Any) -> float:
     match = NUMBER_RE.search(_text(value).replace(",", ""))
     return float(match.group()) if match else float("nan")
@@ -763,6 +772,7 @@ def collect_outlook_bid_rows(project_dir: Path) -> pd.DataFrame:
                     "pandh": "P&H",
                 }
                 if not frame.empty:
+                    frame["Quote Date"] = _email_quote_date(item)
                     frames.append(frame)
                     message = f"[SUCCESS] {labels[source]} email bids (OCR): {len(frame)} rows from {len(saved)} image attachment(s)"
                 else:
@@ -784,6 +794,7 @@ def collect_outlook_bid_rows(project_dir: Path) -> pd.DataFrame:
         try:
             frame = parser(html)
             if not frame.empty:
+                frame["Quote Date"] = _email_quote_date(item)
                 frames.append(frame)
                 message = f"[SUCCESS] {source.title()} email bids: {len(frame)} rows"
                 print(message)

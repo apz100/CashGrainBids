@@ -9,6 +9,7 @@ import pandas as pd
 from playwright.sync_api import sync_playwright
 
 from email_bid_sources import collect_outlook_bid_rows
+from ceresco_bids import collect_ceresco_bids
 
 from .config import AGRICHARTS_TARGETS, FX_DIR, INGREDION_STORAGE_STATE, OUTPUT_DIR
 from .fx_rates import add_us_basis_from_spot
@@ -32,7 +33,9 @@ from .web_collectors import (
 def main() -> int:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     fetch_date = datetime.now().strftime("%Y-%m-%d")
-    csv_path = OUTPUT_DIR / f"EasternOntario_CashBids_{fetch_date}.csv"
+    run_period = "AM" if datetime.now().hour < 12 else "PM"
+    run_tag = f"{fetch_date}_{run_period}"
+    csv_path = OUTPUT_DIR / f"EasternOntario_CashBids_{run_tag}.csv"
     rows: list[pd.DataFrame] = []
 
     with sync_playwright() as playwright:
@@ -51,6 +54,7 @@ def main() -> int:
                 else:
                     frame.insert(0, "Source", "AgriCharts")
                     frame.insert(1, "Location", target["name"])
+                    frame["Quote Date"] = fetch_date
                     rows.append(add_mt_cash_price(frame))
                     print(f"[OK] {target['name']}: {len(frame)} rows")
             except Exception as error:
@@ -66,6 +70,8 @@ def main() -> int:
                 if frame is None or frame.empty:
                     print(f"[WARN] {source_name}: no data collected")
                 else:
+                    if "Quote Date" not in frame:
+                        frame["Quote Date"] = fetch_date
                     rows.append(frame)
                     print(f"[OK] {source_name}: {len(frame)} rows")
             except Exception as error:
@@ -81,6 +87,10 @@ def main() -> int:
             print(f"[OK] Outlook email bids: {len(email_rows)} rows")
     except Exception as error:
         print(f"[ERR] Outlook email bids: {error}")
+
+    ceresco_rows = collect_ceresco_bids()
+    rows.append(ceresco_rows)
+    print(f"[OK] Ceresco manual bids: {len(ceresco_rows)} rows; quote date not supplied")
 
     if not rows:
         print("No data collected.")

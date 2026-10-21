@@ -13,6 +13,7 @@ from playwright.sync_api import sync_playwright
 
 from .classification import classify_bid
 from .config import OUTPUT_DIR, REPORT_DIR
+from .fixed_report import build_fixed_pdf, build_net_all_commercial_pdf
 
 
 def _money(series: pd.Series) -> pd.Series:
@@ -32,49 +33,81 @@ def _table(frame: pd.DataFrame, columns: list[str], limit: int = 40) -> str:
 
 
 def build_html(frame: pd.DataFrame, report_date: str) -> str:
-    """Build the self-contained report body from one daily output file."""
+    """Build a three-page elevator basis market-position report."""
     frame = frame.copy()
     frame["Category"] = frame.apply(classify_bid, axis=1)
     frame["_cash"] = _money(frame.get("Bushel Cash Price", pd.Series("", index=frame.index)))
-    frame["_basis_change"] = _money(frame.get("Basis Change", pd.Series("", index=frame.index)))
-    frame["Commodity"] = frame.get("Name", "").astype(str)
-    frame["Delivery"] = frame.get("Delivery", "").astype(str)
+    frame["_mt"] = _money(frame.get("MT Cash Price", pd.Series("", index=frame.index)))
+    frame["_basis"] = _money(frame.get("Basis", pd.Series("", index=frame.index)))
+    frame["_change"] = _money(frame.get("Basis Change", pd.Series("", index=frame.index)))
+    elevators = frame[frame["Category"].eq("Elevator")].copy()
+    elevators["_rank"] = elevators.groupby(["Name", "Delivery"], dropna=False)["_cash"].rank(method="min", ascending=False)
 
-    source_counts = frame.groupby(["Category", "Source"], dropna=False).size().reset_index(name="Rows")
-    category_counts = frame["Category"].value_counts().rename_axis("Category").reset_index(name="Rows")
-    changed = frame[frame["_basis_change"].notna() & frame["_basis_change"].ne(0)].copy()
-    changed["Basis Change"] = changed["_basis_change"].map(lambda value: f"{value:.2f}")
-    best = frame[frame["_cash"].notna()].sort_values("_cash", ascending=False)
-    best = best.drop_duplicates(["Commodity", "Delivery"], keep="first")
-    best["Cash Price"] = best["_cash"].map(lambda value: f"${value:.2f}")
-    summary = pd.DataFrame([
-        {"Metric": "Rows collected", "Value": len(frame)},
-        {"Metric": "Sources", "Value": frame["Source"].nunique()},
-        {"Metric": "Categories", "Value": frame["Category"].nunique()},
-        {"Metric": "Rows with basis change", "Value": len(changed)},
-    ])
+    def fmt(value, prefix=""):
+        return "" if pd.isna(value) else f"{prefix}{float(value):.2f}"
 
+    def commodity_table(name, color="#e7f0d2"):
+        data = elevators[elevators["Name"].str.contains(name, case=False, na=False)].copy()
+        if data.empty:
+            return '<div class="empty">No bids reported.</div>'
+        data["Location"] = data["Location"].str.replace(f" {name}", "", regex=False)
+        data["Bid"] = data["_cash"].map(lambda x: fmt(x, "$"))
+        data["CAD/MT"] = data["_mt"].map(lambda x: fmt(x, "$"))
+        data["Basis"] = data["_basis"].map(fmt)
+        data["Change"] = data["_change"].map(lambda x: fmt(x, "+"))
+        data["Rank"] = data["_rank"].map(lambda x: "" if pd.isna(x) else str(int(x)))
+        data = data.sort_values(["Delivery", "_rank", "Location"], kind="stable")
+        parts = ['<table class="market"><thead><tr><th>Delivery</th><th>Location</th><th>CAD Basis</th><th>Cash/Bu</th><th>CAD/MT</th><th>Change</th><th>Rank</th></tr></thead><tbody>']
+        for location, group in data.groupby("Location", sort=False):
+            parts.append(f'<tr class="location"><td colspan="7">{html.escape(str(location))}</td></tr>')
+            for _, row in group.iterrows():
+                rank_class = "best" if row["_rank"] == 1 else ""
+                parts.append(
+                    f'<tr class="{rank_class}"><td>{html.escape(str(row["Delivery"]))}</td>'
+                    f'<td>{html.escape(str(location))}</td><td>{fmt(row["_basis"])}</td>'
+                    f'<td>{fmt(row["_cash"], "$")}</td><td>{fmt(row["_mt"], "$")}</td>'
+                    f'<td>{fmt(row["_change"], "+")}</td><td>{"" if pd.isna(row["_rank"]) else int(row["_rank"])}</td></tr>'
+                )
+        parts.append('</tbody></table>')
+        table = "".join(parts)
+        return f'<div class="commodity" style="--commodity:{color}"><div class="commodity-title">{html.escape(name.upper())}</div>{table}</div>'
+
+    def commodity_section(name, color):
+        return commodity_table(name, color)
+
+    changed = elevators[elevators["_change"].notna() & elevators["_change"].ne(0)].copy()
+    if not changed.empty:
+        changed["Location"] = changed["Location"].str.replace(r"\s+(Corn|Soybeans|Wheat)$", "", regex=True)
+        changed["Change"] = changed["_change"].map(lambda x: fmt(x, "+"))
+        changes_html = changed[["Name", "Delivery", "Location", "Change"]].sort_values(["Name", "Delivery"]).to_html(index=False, classes="market", na_rep="", escape=True)
+    else:
+        changes_html = '<div class="empty">No comparable CAD basis changes.</div>'
+
+    missing = elevators[elevators[["_cash", "_basis"]].isna().any(axis=1)]
+    warning = f'<div class="warning">Data warning: {len(missing)} elevator rows have missing cash or basis values.</div>' if not missing.empty else ''
     return f"""<!doctype html>
 <html><head><meta charset="utf-8"><style>
-@page {{ size: Letter landscape; margin: 0.45in; }}
-body {{ font-family: Arial, sans-serif; color: #172033; font-size: 10px; }}
-h1 {{ color: #174a7e; margin: 0 0 3px; font-size: 23px; }}
-h2 {{ color: #174a7e; border-bottom: 2px solid #8eb7d9; padding-bottom: 3px; margin: 16px 0 5px; }}
-.subtitle {{ color: #566273; margin-bottom: 12px; }} .grid {{ display: flex; gap: 10px; }}
-.card {{ flex: 1; border: 1px solid #cbd5e1; padding: 7px; }}
-.data {{ border-collapse: collapse; width: 100%; margin-top: 4px; }}
-.data th {{ background: #174a7e; color: white; padding: 4px; text-align: left; }}
-.data td {{ border-bottom: 1px solid #dbe2ea; padding: 3px 4px; }}
-.data tr:nth-child(even) {{ background: #f3f7fb; }} .muted {{ color: #687386; }}
-.pagebreak {{ break-before: page; }}
+@page {{ size: Letter landscape; margin: 0.35in; }} body {{ font-family: Arial, sans-serif; color: #152238; font-size: 9px; }}
+.header {{ background:#214f82; color:#fff; padding:12px 16px; border-bottom:7px solid #f3d21b; }}
+h1 {{ margin:0; font-size:25px; letter-spacing:.3px; }} .subtitle {{ margin-top:4px; font-size:11px; }}
+.intro {{ background:#e9f1d4; border:1px solid #9cae72; padding:7px 10px; margin-top:8px; }}
+.commodity {{ margin:8px 0 12px; border:1px solid #263b52; }} .commodity-title {{ background:var(--commodity); font-size:15px; font-weight:bold; padding:5px 8px; border-bottom:2px solid #263b52; }}
+.market {{ border-collapse:collapse; width:100%; table-layout:fixed; }} .market th {{ background:#214f82; color:#fff; padding:4px; text-align:center; font-size:9px; }}
+.market td {{ border:1px solid #9aa6b5; padding:3px 4px; text-align:right; }} .market td:first-child,.market td:nth-child(2) {{ text-align:left; }}
+.market tr:nth-child(even) {{ background:#f1f4f7; }} .market tr:first-child td {{ border-top:0; }}
+.market .location td {{ background:#d6e5b6; font-weight:bold; text-align:left; color:#1c2c1b; }} .market .best td {{ background:#fff36a; font-weight:bold; }}
+.pagebreak {{ break-before:page; }} .warning {{ background:#fff0c2; border:1px solid #bf8b00; padding:6px; margin:8px 0; }}
+.empty {{ border:1px solid #aaa; padding:8px; color:#777; }} .footer {{ margin-top:8px; color:#596575; font-size:8px; }}
 </style></head><body>
-<h1>Eastern Ontario Cash Bids</h1>
-<div class="subtitle">Daily report for {html.escape(report_date)} | Generated {datetime.now():%Y-%m-%d %H:%M}</div>
-<div class="grid"><div class="card"><h2>Summary</h2>{_table(summary, ['Metric', 'Value'])}</div>
-<div class="card"><h2>Rows by category</h2>{_table(category_counts, ['Category', 'Rows'])}</div></div>
-<h2>Sources collected</h2>{_table(source_counts, ['Category', 'Source', 'Rows'])}
-<h2>Highest available cash bids by commodity and delivery</h2>{_table(best, ['Category', 'Source', 'Location', 'Commodity', 'Delivery', 'Cash Price'])}
-<h2 class="pagebreak">Basis changes</h2>{_table(changed, ['Category', 'Source', 'Location', 'Commodity', 'Delivery', 'Basis', 'Basis Change'])}
+<div class="header"><h1>North Gower Grains</h1><div class="subtitle">Eastern Ontario Elevator Basis Market Position | {html.escape(report_date)} | Generated {datetime.now():%Y-%m-%d %H:%M}</div></div>
+<div class="intro"><b>Purpose:</b> comparison of elevator bids available to Eastern Ontario producers. Basis and cash values are shown in CAD; Rank 1 is the strongest available elevator bid for the delivery.</div>
+{warning}{commodity_section('Corn', '#f7cfae')}{commodity_section('Soybeans', '#dce9b8')}
+<div class="footer">Sources: AgriCharts and configured elevator sources. Commercial buyers and direct-ship competitors are excluded from elevator rankings.</div>
+<div class="pagebreak"><div class="header"><h1>North Gower Grains</h1><div class="subtitle">Elevator Basis Market Position - Wheat</div></div>{commodity_section('SRW', '#e8b7b7')}{commodity_section('HRW', '#e8b7b7')}{commodity_section('HRS', '#e8b7b7')}{commodity_section('Wheat', '#e8b7b7')}</div>
+<div class="pagebreak"><div class="header"><h1>North Gower Grains</h1><div class="subtitle">Daily Changes and Data Notes | {html.escape(report_date)}</div></div>
+<div class="commodity" style="--commodity:#f4df20"><div class="commodity-title">CAD BASIS MOVEMENT</div>{changes_html}</div>
+<h2>Report notes</h2><div class="intro">Basis Change is the CAD basis movement versus the most recent prior daily file. USD basis changes are retained in the workbook and will be added to this page once the elevator report layout is finalized.</div>
+<div class="footer">This report is generated from the preserved daily CSV. Blank values indicate that the source did not provide a comparable quote.</div></div>
 </body></html>"""
 
 
@@ -102,20 +135,18 @@ def main() -> int:
     if csv_path is None:
         print(f"[ERR] No daily CSV found in {OUTPUT_DIR}")
         return 1
-    report_date = csv_path.stem.rsplit("_", 1)[-1]
+    stem_parts = csv_path.stem.split("_")
+    report_date = "_".join(stem_parts[-2:]) if stem_parts[-1] in {"AM", "PM"} else stem_parts[-1]
     frame = pd.read_csv(csv_path, dtype=str).fillna("")
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
     html_path = REPORT_DIR / f"EasternOntario_CashBids_Report_{report_date}.html"
     pdf_path = REPORT_DIR / f"EasternOntario_CashBids_Report_{report_date}.pdf"
+    commercial_pdf_path = REPORT_DIR / f"EasternOntario_Commercial_Buyers_{report_date}.pdf"
     content = build_html(frame, report_date)
     html_path.write_text(content, encoding="utf-8")
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=True)
-        page = browser.new_page()
-        page.set_content(content, wait_until="load")
-        page.pdf(path=str(pdf_path), format="Letter", landscape=True, print_background=True)
-        browser.close()
+    build_fixed_pdf(frame, report_date, pdf_path)
+    build_net_all_commercial_pdf(frame, report_date, commercial_pdf_path)
     print(f"[OK] Wrote report: {pdf_path}")
-    files = [csv_path, csv_path.with_suffix(".xlsx"), html_path, pdf_path]
+    files = [csv_path, csv_path.with_suffix(".xlsx"), html_path, pdf_path, commercial_pdf_path]
     export_to_drive([path for path in files if path.is_file()], report_date)
     return 0

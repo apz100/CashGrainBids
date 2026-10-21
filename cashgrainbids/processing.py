@@ -284,7 +284,7 @@ def find_previous_output_file(output_dir: Path, fetch_date: str) -> Optional[Pat
     current = date.fromisoformat(fetch_date)
     best: tuple[date, Path] | None = None
     for path in output_dir.glob("EasternOntario_CashBids_*.csv"):
-        match = re.search(r"_(\d{4}-\d{2}-\d{2})\.csv$", path.name)
+        match = re.search(r"_(\d{4}-\d{2}-\d{2})(?:_(?:AM|PM))?\.csv$", path.name)
         if not match:
             continue
         candidate_date = date.fromisoformat(match.group(1))
