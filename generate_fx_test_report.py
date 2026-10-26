@@ -7,6 +7,7 @@ import pandas as pd
 from cashgrainbids.config import FX_DIR, OUTPUT_DIR, REPORT_DIR
 from cashgrainbids.fixed_report import build_fixed_pdf, build_net_all_commercial_pdf
 from cashgrainbids.fx_rates import add_us_basis_from_spot, add_wanna_make_it_nearby_basis
+from email_bid_sources import parse_wanna_make_it_nearby_futures
 
 
 def main() -> int:
@@ -14,6 +15,15 @@ def main() -> int:
     report_date = csv_path.stem.removeprefix("EasternOntario_CashBids_")
     fetch_date = report_date[:10]
     frame = pd.read_csv(csv_path, dtype=str).fillna("")
+    # Test the email-stated futures path using the latest saved WMI email.
+    # The normal collector will populate this metadata on the next full run.
+    email_path = Path("logs") / "wanna_make_it_latest_email.html"
+    if email_path.exists():
+        email_futures = parse_wanna_make_it_nearby_futures(email_path.read_text(encoding="utf-8", errors="ignore"))
+        wmi = frame["Source"].astype(str).str.contains("wanna make it", case=False, na=False)
+        for commodity, value in email_futures.items():
+            mask = wmi & frame["Name"].astype(str).str.fullmatch(commodity, case=False, na=False)
+            frame.loc[mask, "Email Futures Price"] = value
     frame = add_wanna_make_it_nearby_basis(frame, fetch_date)
     frame = add_us_basis_from_spot(frame, fetch_date, FX_DIR)
     REPORT_DIR.mkdir(parents=True, exist_ok=True)

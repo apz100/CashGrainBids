@@ -20,6 +20,7 @@ from email_bid_sources import (
     parse_bunge,
     parse_pandh_ocr,
     parse_wanna_make_it,
+    parse_wanna_make_it_nearby_futures,
 )
 from cashgrainbids.classification import classify_bid
 from cashgrainbids.config import AGRICHARTS_TARGETS
@@ -27,9 +28,35 @@ from cashgrainbids.fx_rates import add_us_basis_from_spot, add_wanna_make_it_nea
 from basis_normalization import add_standardized_commercial_basis
 from cashgrainbids.pricing_decisions import add_pricing_decision_columns
 from cashgrainbids.fixed_report import _single_month_delivery_labels
+from cashgrainbids.wmi_futures import verify_nearby_futures_price
 
 
 class CashBidsRegressionTests(unittest.TestCase):
+    def test_wmi_email_nearby_futures_values_are_parsed(self):
+        text = "Nearby futures of corn trading at $4.52; soybeans at $12.35 and wheat is at $6.24 USD per bushel."
+        self.assertEqual(parse_wanna_make_it_nearby_futures(text), {"Corn": 4.52, "Soybeans": 12.35, "SRW": 6.24})
+
+    def test_wmi_futures_verification_accepts_unknown_delay(self):
+        quotes = pd.DataFrame([
+            {"Timestamp": "2026-10-22 09:53:00", "Contract": "SX26", "Price": 12.35},
+            {"Timestamp": "2026-10-22 10:03:00", "Contract": "SF27", "Price": 12.44},
+        ])
+        result = verify_nearby_futures_price(
+            12.35, pd.Timestamp("2026-10-22 10:03:00"), quotes
+        )
+        self.assertEqual(result["status"], "Verified")
+        self.assertEqual(result["contract"], "SX26")
+        self.assertEqual(result["delay_minutes"], 10)
+
+    def test_wmi_futures_verification_flags_roll_ambiguity(self):
+        quotes = pd.DataFrame([
+            {"Timestamp": "2026-10-22 10:03:00", "Contract": "SX26", "Price": 12.35},
+            {"Timestamp": "2026-10-22 09:53:00", "Contract": "SF27", "Price": 12.35},
+        ])
+        result = verify_nearby_futures_price(
+            12.35, pd.Timestamp("2026-10-22 10:03:00"), quotes
+        )
+        self.assertEqual(result["status"], "Ambiguous contract/timing")
     def test_ngg_pricing_decision_layer_corn_and_soybeans(self):
         rows = [
             {"Source": "AgriCharts", "Location": "North Gower Corn", "Name": "Corn",

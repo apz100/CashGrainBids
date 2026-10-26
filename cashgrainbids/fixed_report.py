@@ -156,7 +156,7 @@ def _table(c, x, y, width, rows, title, color):
         vals = (idx, row["Location"], _basis(row.get("Basis")), _money(row.get("Bushel Cash Price")), _money(row.get("MT Cash Price")))
         cursor = x
         for val, w in zip(vals, widths):
-            _center(c, cursor, y + 8, w, val, 10 if idx > 1 else 10, idx == 1 and False)
+            _center(c, cursor, y + 8, w, val, 11 if idx > 1 else 11, idx == 1 and False)
             cursor += w
         y -= 28
     return y
@@ -211,7 +211,7 @@ def _draw_market_panel(c, x, y, width, commodity, subset, crop_label, crop_color
         vals = (location_number, location, _basis(row.get("Basis")), _money(row.get("Bushel Cash Price")), _money(row.get("MT Cash Price")))
         cursor = x
         for val, w in zip(vals, widths):
-            _center(c, cursor, y + 8, w, val, 10, False); cursor += w
+            _center(c, cursor, y + 8, w, val, 11, False); cursor += w
         y -= 26
     if not farm_reference.empty and y >= 40:
         row = farm_reference.sort_values("Delivery", key=lambda values: values.map(_delivery_sort_key)).iloc[0]
@@ -220,7 +220,7 @@ def _draw_market_panel(c, x, y, width, commodity, subset, crop_label, crop_color
         vals = ("", "Wanna Make It (FOB Farm)", _basis(row.get("Basis")), _money(row.get("Bushel Cash Price")), _money(row.get("MT Cash Price")))
         cursor = x
         for val, w in zip(vals, widths):
-            _center(c, cursor, y + 8, w, val, 9, False); cursor += w
+            _center(c, cursor, y + 8, w, val, 10, False); cursor += w
         y -= 26
     return y
 
@@ -290,7 +290,7 @@ def build_fixed_pdf(frame: pd.DataFrame, report_date: str, output_path: Path) ->
             old = subset[old_mask]
             new = subset[~old_mask]
             if panel_type in {"Corn", "Soybeans"} and col == 0:
-                nearby_labels = [f"{nearby_month} {report_year}"]
+                nearby_labels = [f"{nearby_month} {report_year}", nearby_month]
                 if panel_type == "Corn":
                     nearby_labels.append(f"Harvest {report_year}")
                 nearby_pattern = "|".join(re.escape(label) for label in nearby_labels)
@@ -304,7 +304,7 @@ def build_fixed_pdf(frame: pd.DataFrame, report_date: str, output_path: Path) ->
                     raw_frame["Source"].astype(str).str.contains("wanna make it", case=False, na=False)
                     & raw_frame["Name"].astype(str).str.contains(panel_type, case=False, na=False)
                     & raw_frame.get("Bid Type", pd.Series("", index=raw_frame.index)).astype(str).str.lower().eq("fob farm")
-                    & raw_frame["Delivery"].astype(str).str.contains(report_year, na=False)
+                    & raw_frame["Delivery"].astype(str).str.contains(nearby_pattern, case=False, na=False, regex=True)
                 ].copy()
                 if not farm.empty and wmi_nearby_elevator.empty:
                     old = pd.concat([old, farm.sort_values("Delivery", key=lambda values: values.map(_delivery_sort_key)).head(1)], ignore_index=True)

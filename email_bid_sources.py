@@ -208,6 +208,22 @@ def _wanna_make_it_delivery(value: str) -> str:
     return _month(raw)
 
 
+def parse_wanna_make_it_nearby_futures(text: str) -> dict[str, float]:
+    """Extract the email's stated nearby futures values by commodity."""
+    plain = _text(re.sub(r"<[^>]+>", " ", html.unescape(text)))
+    prices: dict[str, float] = {}
+    patterns = {
+        "Corn": r"nearby\s+futures\s+of\s+corn\s+trading\s+at\s+\$?([0-9]+(?:\.[0-9]+)?)",
+        "Soybeans": r"soybeans?\s+at\s+\$?([0-9]+(?:\.[0-9]+)?)",
+        "SRW": r"(?:and\s+)?wheat\s+is\s+at\s+\$?([0-9]+(?:\.[0-9]+)?)",
+    }
+    for commodity, pattern in patterns.items():
+        match = re.search(pattern, plain, re.I)
+        if match:
+            prices[commodity] = float(match.group(1))
+    return prices
+
+
 def parse_wanna_make_it(text: str) -> pd.DataFrame:
     """Parse Wanna Make It text bids, keeping farm pickup separate.
 
@@ -219,6 +235,7 @@ def parse_wanna_make_it(text: str) -> pd.DataFrame:
     commodity = ""
     location = ""
     bid_type = ""
+    nearby_futures = parse_wanna_make_it_nearby_futures(text)
     for raw_line in re.sub(r"<[^>]+>", "\n", html.unescape(text)).splitlines():
         line = _text(raw_line).replace("\u200b", "")
         if not line:
@@ -259,6 +276,11 @@ def parse_wanna_make_it(text: str) -> pd.DataFrame:
             mt_price / factor, mt_price,
         )
         row["Bid Type"] = bid_type
+        if commodity in nearby_futures:
+            # Internal metadata used by the test/verification path. It is
+            # intentionally not displayed as a new report column.
+            row["Email Futures Price"] = nearby_futures[commodity]
+            row["Email Futures Source"] = "Email stated nearby"
         rows.append(row)
     return pd.DataFrame(rows)
 

@@ -326,6 +326,7 @@ def add_wanna_make_it_nearby_basis(df: pd.DataFrame, fetch_date: str) -> pd.Data
     except ValueError:
         return out
     nearby_delivery = current.strftime("%b %Y")
+    nearby_month = current.strftime("%b")
     source_mask = out["Source"].astype(str).str.lower().eq("agricharts")
     wmi_mask = out["Source"].astype(str).str.lower().eq("wanna make it email bids")
     out["Futures Month"] = out["Futures Month"].astype(object)
@@ -334,7 +335,8 @@ def add_wanna_make_it_nearby_basis(df: pd.DataFrame, fetch_date: str) -> pd.Data
     for commodity in ("Soybeans", "Corn"):
         commodity_ref = out[source_mask & out["Name"].astype(str).str.fullmatch(commodity, case=False, na=False)]
         ref_delivery = commodity_ref["Delivery"].astype(str).str.contains(
-            rf"(?:{re.escape(nearby_delivery)}|Harvest\s+{current.year})", case=False, na=False
+            rf"(?:{re.escape(nearby_delivery)}|{re.escape(nearby_month)}(?:\s+{current.year})?|Harvest\s+{current.year})",
+            case=False, na=False,
         )
         references = commodity_ref[ref_delivery & commodity_ref["Futures Month"].astype(str).ne("")]
         if references.empty:
@@ -346,20 +348,29 @@ def add_wanna_make_it_nearby_basis(df: pd.DataFrame, fetch_date: str) -> pd.Data
         future_price = float(future_values.iloc[0])
         if commodity == "Corn":
             nearby_mask = out["Delivery"].astype(str).str.contains(
-                rf"(?:{re.escape(nearby_delivery)}|Harvest\s+{current.year})", case=False, na=False
+                rf"(?:{re.escape(nearby_delivery)}|{re.escape(nearby_month)}(?:\s+{current.year})?|Harvest\s+{current.year})",
+                case=False, na=False,
             )
         else:
-            nearby_mask = out["Delivery"].astype(str).eq(nearby_delivery)
+            nearby_mask = out["Delivery"].astype(str).str.fullmatch(
+                rf"{re.escape(nearby_month)}(?:\s+{current.year})?", case=False, na=False
+            )
         target = wmi_mask & out["Name"].astype(str).str.fullmatch(commodity, case=False, na=False) & nearby_mask
         if not target.any():
             continue
         out.loc[target, "Futures Month"] = future_month
-        out.loc[target, "Futures Price"] = f"{future_price:.4f}"
+        email_futures = pd.to_numeric(
+            out.loc[target].get("Email Futures Price", pd.Series(index=out.loc[target].index)),
+            errors="coerce",
+        )
+        email_futures = email_futures.dropna()
+        applied_futures = float(email_futures.iloc[0]) if not email_futures.empty else future_price
+        out.loc[target, "Futures Price"] = f"{applied_futures:.4f}"
         cash_bu = pd.to_numeric(
             out.loc[target, "Bushel Cash Price"].astype(str).str.replace(r"[^0-9.\-]", "", regex=True),
             errors="coerce",
         )
-        out.loc[target, "Basis"] = cash_bu - future_price
+        out.loc[target, "Basis"] = cash_bu - applied_futures
     return out
 
 
