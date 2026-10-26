@@ -21,4 +21,11 @@ def classify_bid(row: Mapping[str, object]) -> str:
         return "Direct Ship Competitor" if any(word in location for word in ("port", "sorel", "direct")) else "Elevator"
     if "broadgrain" in source:
         return "Direct Ship Competitor" if any(word in location for word in ("port", "sorel", "terminal")) else "Elevator"
+    if "wanna make it" in source:
+        bid_type = str(row.get("Bid Type", "")).lower()
+        if "fob farm" in bid_type:
+            return "FOB Farm Reference"
+        if str(row.get("Location", "")).strip().lower() == "wanna make it elevator":
+            return "Elevator"
+        return "Unclassified"
     return "Unclassified"

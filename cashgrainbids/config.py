@@ -16,6 +16,18 @@ GREENFIELD_URL = "https://ggi.marketplace.barchart.com/cash-bids"
 GREAT_LAKES_URL = "https://www.greatlakesgrain.com/cash-bids"
 INGREDION_STORAGE_STATE = PROJECT_DIR / "ingredion_storage_state.json"
 
+# Pricing-decision controls. Keep ceilings unset until NGG supplies approved
+# limits; None prevents an automatic recommendation.
+NGG_US_BASIS_CEILINGS = {
+    ("Corn", "current"): None,
+    ("Corn", "next"): None,
+    ("Soybeans", "current"): None,
+    ("Soybeans", "next"): None,
+}
+NGG_COMPETITOR_PREMIUMS = {"Corn": 0.0, "Soybeans": 0.0}
+NGG_BENCHMARK_METHOD = "average_competitor"
+NGG_SELECTED_COMPETITOR = ""
+
 # Adding or removing an AgriCharts location is a configuration change, not a
 # change to the collector itself.
 AGRICHARTS_TARGETS = (
@@ -55,5 +67,12 @@ EMAIL_LOCATION_ALLOWLIST = {
 OUTPUT_COLUMNS = (
     "Source", "Location", "Name", "Delivery", "Delivery End", "Futures Month",
     "Futures Price", "Change", "Basis", "Basis Change", "US Basis (USD/bu)", "US Basis Change",
-    "Bushel Cash Price", "MT Cash Price", "Quote Date",
+    "Bushel Cash Price", "MT Cash Price", "Bid Type", "Quote Date", "FX Rate", "FX Type",
+    "FX Quote Date",
+    "Standard Futures Month", "Standard Futures Price", "Standardized US Basis (USD/bu)", "Basis Normalization Status",
+    # Compact published decision view. The remaining decision calculations
+    # stay available internally for reports and future review.
+    "FX Neutral CAD Basis", "FX/Futures Adjustment",
+    "Competitor Benchmark US Basis", "Competitive CAD Basis",
+    "Recommended Max CAD Basis", "Current CAD Basis vs Recommended",
 )

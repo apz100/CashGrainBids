@@ -7,6 +7,7 @@ they are publisher-specific and may change independently.
 from __future__ import annotations
 
 import io
+import html
 import os
 import re
 import shutil
@@ -195,6 +196,73 @@ def parse_macewen(html: str) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _wanna_make_it_delivery(value: str) -> str:
+    """Normalize Wanna Make It's compact labels such as ``Dec26``."""
+    raw = _text(value).replace("/", " ")
+    match = re.match(r"^(Harvest)\s*(\d{2,4})$", raw, re.I)
+    if match:
+        return _month(f"Harvest {match.group(2)}")
+    match = re.match(r"^([A-Za-z]{3,9})[- ]?(\d{2,4})$", raw)
+    if match:
+        return _month(f"{match.group(1)} {match.group(2)}")
+    return _month(raw)
+
+
+def parse_wanna_make_it(text: str) -> pd.DataFrame:
+    """Parse Wanna Make It text bids, keeping farm pickup separate.
+
+    These emails quote flat CAD/MT prices rather than basis.  We therefore
+    retain the printed MT price and derive CAD/bu for the common output while
+    leaving futures and basis blank; no basis is invented from a flat price.
+    """
+    rows: list[dict] = []
+    commodity = ""
+    location = ""
+    bid_type = ""
+    for raw_line in re.sub(r"<[^>]+>", "\n", html.unescape(text)).splitlines():
+        line = _text(raw_line).replace("\u200b", "")
+        if not line:
+            continue
+        lower = line.lower()
+        if lower in {"corn", "soybeans", "soybean", "wheat", "srw", "hrw", "hrs"}:
+            commodity = "Soybeans" if lower in {"soybeans", "soybean"} else "Corn" if lower == "corn" else line.upper()
+            location = ""
+            bid_type = ""
+            continue
+        if lower in {"fob farm", "fob farm:", "fob farm bids"}:
+            bid_type = "FOB Farm"
+            location = "Wanna Make It Farm"
+            continue
+        delivery_heading = re.match(r"^del\s+(.+)$", line, re.I)
+        if delivery_heading:
+            destination = delivery_heading.group(1).strip().rstrip(":")
+            # Only the publisher's generic delivered-elevator quote belongs
+            # in this first comparison.  Do not pull destination-specific
+            # sections such as Del Johnstown or Del Montreal into it.
+            if destination.lower() == "elevator":
+                bid_type = "Delivered Elevator"
+                location = "Wanna Make It Elevator"
+            else:
+                bid_type = ""
+                location = ""
+            continue
+        if not commodity or not bid_type:
+            continue
+        quote = re.match(r"^\$?\s*(\d+(?:\.\d{1,2})?)\s+(.+?)\s*$", line)
+        if not quote:
+            continue
+        mt_price = float(quote.group(1))
+        delivery = _wanna_make_it_delivery(quote.group(2))
+        factor = 39.3683 if commodity == "Corn" else 36.7437
+        row = _row(
+            "Wanna Make It email bids", location, commodity, delivery, "", "", "",
+            mt_price / factor, mt_price,
+        )
+        row["Bid Type"] = bid_type
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
 def parse_richard(html: str) -> pd.DataFrame:
     """Parse Richard Kricsfalusy's HTML bid tables (no OCR required)."""
     rows: list[dict] = []
@@ -243,10 +311,22 @@ def parse_bunge(text: str) -> pd.DataFrame:
     section_re = re.compile(r"\b(soybeans?|corn)\s+(bcc|mtl)\b", re.I)
     bid_re = re.compile(
         r"^\s*([A-Za-z]{3,9}-\d{2})(?:\s+\d{1,2}-\d{1,2}(?:st|nd|rd|th)?\.?)?\s*:?\s*"
-        r"([+-]?\d+(?:\.\d+)?)\s*([A-Z]{1,3}\d{2})\b",
+        r"([+-]?(?:\d+(?:\.\d+)?|\.\d+))\s*([A-Z]{1,3}\d{2})\b",
         re.I,
     )
-    for raw_line in re.sub(r"<[^>]+>", "\n", str(text)).splitlines():
+    # Decode HTML entities such as &nbsp; before matching compact values like
+    # "+.45CH27" from Outlook's HTMLBody.
+    plain_text = html.unescape(re.sub(r"<[^>]+>", "\n", str(text)))
+    # Outlook may split the underlined date range and its superscript suffix
+    # across separate lines when HTML tags are removed.
+    plain_text = re.sub(
+        r"([A-Za-z]{3}-\d{2})\s*\n\s*(\d{1,2}-\d{1,2})\s*\n\s*"
+        r"(st|nd|rd|th)\s*\n\s*(:\s*[+-]?(?:\d+(?:\.\d+)?|\.\d+)\s*[A-Z]{1,3}\d{2})",
+        r"\1 \2\3\4",
+        plain_text,
+        flags=re.I,
+    )
+    for raw_line in plain_text.splitlines():
         line = _text(raw_line).replace("•", "")
         if not line:
             continue
@@ -509,9 +589,9 @@ def parse_pandh_images(image_paths: list[Path], output_dir: Path) -> pd.DataFram
 
 
 _BROADGRAIN_ROW_RE = re.compile(
-    r"(?P<delivery>[A-Za-z]{3,9}-\d{2}|Harvest-?\d{2})\s+\$?\s*"
+    r"(?P<delivery>(?:[A-Za-z]{3,9}(?:\s*[/\-]\s*[A-Za-z]{3,9})?[- ]?-?\d{2,4}|Harvest-?\d{2,4}))\s*[\)\]]?\s+\$?\s*"
     r"(?P<basis>[+-]?\d+(?:\.\d+)?)\s+(?P<futures>\d+(?:\.\d+)?)\s+"
-    r"(?P<contract>[A-Za-z]{1,3}\d{1,2})\s+\$?\s*(?P<cash>\d+(?:\.\d+)?)\s+\$?\s*"
+    r"(?P<contract>[A-Za-z]{1,3}\d{1,2}[~\)]?)\s+\$?\s*(?P<cash>\d+(?:\.\d+)?)\s+\$?\s*"
     r"(?P<mt>\d+(?:\.\d+)?)",
     re.I,
 )
@@ -566,7 +646,7 @@ def parse_broadgrain_ocr(text: str) -> pd.DataFrame:
         if not match or not commodity:
             continue
         values = match.groupdict()
-        contract = values["contract"].upper()
+        contract = values["contract"].upper().rstrip("~)]")
         row_commodity = (
             "Soybeans" if contract.startswith("S") else
             "Corn" if contract.startswith("C") else
@@ -574,7 +654,7 @@ def parse_broadgrain_ocr(text: str) -> pd.DataFrame:
         )
         row = _row_from_mt(
             "BroadGrain email bids", location, row_commodity, values["delivery"],
-            values["contract"], _ocr_futures(values["futures"]), values["basis"], values["mt"],
+            contract, _ocr_futures(values["futures"]), values["basis"], values["mt"],
         )
         if row is not None:
             rows.append(row)
@@ -618,6 +698,7 @@ def _matches_email_source(item: Any, source: str) -> bool:
     """Identify forwarded/renamed bid emails using subject, sender, and body."""
     subject = _text(getattr(item, "Subject", "")).lower()
     sender = _text(getattr(item, "SenderEmailAddress", "")).lower()
+    sender_name = _text(getattr(item, "SenderName", "")).lower()
     body = _text(getattr(item, "Body", "")).lower()
     html = _text(getattr(item, "HTMLBody", "")).lower()
     searchable = f"{subject} {sender} {body} {html}"
@@ -632,9 +713,13 @@ def _matches_email_source(item: Any, source: str) -> bool:
             ))
         )
     if source == "broadgrain":
-        # Dylan Stewart is the actual BroadGrain sender. Do not mistake an
-        # internal "neighbours' bids" summary for his original bid sheet.
-        return ("dylan stewart" in searchable or "dylan.stewart" in searchable) and "broadgrain" in searchable
+        # BroadGrain must come from Dylan's actual Outlook sender. Do not
+        # select forwarded copies whose body merely contains Dylan's details.
+        actual_sender = f"{sender} {sender_name}"
+        return (
+            ("dylan stewart" in actual_sender or "dylan.stewart@broadgrain.com" in actual_sender)
+            and "broadgrain" in searchable
+        )
     if source == "richardson":
         return (
             "andrea.baronmancera@richardson.ca" in searchable
@@ -649,6 +734,12 @@ def _matches_email_source(item: Any, source: str) -> bool:
         # The sender is the stable identifier; Bunge changes subjects such as
         # "bunge bids - corn/soy" and "Bunge BIDS MTL/BCC".
         return "jose.borunda@bunge.com" in searchable
+    if source == "wanna_make_it":
+        return (
+            "wanna make it" in searchable
+            or "wmif.ca" in searchable
+            or "vidya kuncham" in searchable
+        )
     return False
 
 
@@ -725,8 +816,10 @@ def collect_outlook_bid_rows(project_dir: Path) -> pd.DataFrame:
         "richardson": ("richardson.ca",),
         "pandh": ("pandh.ca",),
         "bunge": ("jose.borunda@bunge.com",),
+        "wanna_make_it": ("wanna make it",),
     }
     found: dict[str, Any] = {}
+    candidates: dict[str, list[Any]] = {source: [] for source in patterns}
     inboxes = _all_inbox_folders(namespace)
     status_lines.append(
         f"Target Outlook account: {TARGET_OUTLOOK_ADDRESS}; mail folders scanned: {len(inboxes)}"
@@ -744,12 +837,68 @@ def collect_outlook_bid_rows(project_dir: Path) -> pd.DataFrame:
         for index in range(1, min(items.Count, 3000) + 1):
             item = items.Item(index)
             for source in patterns:
-                if source not in found and _matches_email_source(item, source):
+                if not _matches_email_source(item, source):
+                    continue
+                candidates[source].append(item)
+
+    def attachment_count(item: Any) -> int:
+        attachments = getattr(item, "Attachments", None)
+        return int(getattr(attachments, "Count", 0) or 0)
+
+    def is_direct_broadgrain(item: Any) -> bool:
+        actual_sender = (
+            f"{_text(getattr(item, 'SenderEmailAddress', ''))} "
+            f"{_text(getattr(item, 'SenderName', ''))}"
+        ).lower()
+        return "dylan.stewart@broadgrain.com" in actual_sender or "dylan stewart" in actual_sender
+
+    def received_timestamp(item: Any) -> pd.Timestamp:
+        value = getattr(item, "ReceivedTime", None) or getattr(item, "SentOn", None)
+        try:
+            return pd.Timestamp(value)
+        except Exception:
+            return pd.Timestamp.min
+
+    for source, matches in candidates.items():
+        if not matches:
+            continue
+        if source == "bunge":
+            # Jose also sends operational notices from the same address.
+            # Sender-only selection can therefore choose a newer non-bid email
+            # and hide an older valid bid sheet. Select the newest message
+            # whose HTML/text actually contains parseable Bunge rows.
+            for item in sorted(matches, key=received_timestamp, reverse=True):
+                candidate_text = _text(getattr(item, "HTMLBody", "")) or _text(getattr(item, "Body", ""))
+                if not parse_bunge(candidate_text).empty:
                     found[source] = item
-            if len(found) == len(patterns):
-                break
-        if len(found) == len(patterns):
-            break
+                    break
+            continue
+        if source in {"broadgrain", "richardson", "pandh"}:
+            usable = [item for item in matches if attachment_count(item) > 0]
+            if not usable:
+                status_lines.append(
+                    f"[FAILURE] {source.title()} matches found, but none had a bid-sheet attachment"
+                )
+                continue
+            if source == "broadgrain":
+                direct = [item for item in usable if is_direct_broadgrain(item)]
+                # Prefer Dylan's original message, but retain forwarded
+                # messages with images as a valid fallback.
+                found[source] = max(direct or usable, key=received_timestamp)
+                if not direct:
+                    status_lines.append(
+                        "[INFO] BroadGrain using forwarded bid email with attachment"
+                    )
+            else:
+                found[source] = max(usable, key=received_timestamp)
+        else:
+            found[source] = max(matches, key=received_timestamp)
+
+    for source in patterns:
+        if source not in found:
+            status_lines.append(
+                f"[FAILURE] {source.title()} no usable matching email found"
+            )
 
     frames: list[pd.DataFrame] = []
     for source, item in found.items():
@@ -787,24 +936,29 @@ def collect_outlook_bid_rows(project_dir: Path) -> pd.DataFrame:
         parser = {
             "macewen": parse_macewen,
             "andersons": parse_andersons,
-            "bunge": lambda value: parse_bunge(
-                getattr(item, "Body", "") or value
-            ),
+            # Bunge's Corn MTL list is present in Outlook's HTMLBody.  The
+            # plain-text Body can omit those list items, so parse the HTML
+            # saved above rather than preferring the incomplete plain text.
+            "bunge": parse_bunge,
+            "wanna_make_it": parse_wanna_make_it,
         }[source]
         try:
             frame = parser(html)
             if not frame.empty:
                 frame["Quote Date"] = _email_quote_date(item)
                 frames.append(frame)
-                message = f"[SUCCESS] {source.title()} email bids: {len(frame)} rows"
+                label = "Wanna Make It" if source == "wanna_make_it" else source.title()
+                message = f"[SUCCESS] {label} email bids: {len(frame)} rows"
                 print(message)
                 status_lines.append(message)
             else:
-                message = f"[FAILURE] {source.title()} email contained no parseable bid rows"
+                label = "Wanna Make It" if source == "wanna_make_it" else source.title()
+                message = f"[FAILURE] {label} email contained no parseable bid rows"
                 print(message)
                 status_lines.append(message)
         except Exception as exc:
-            message = f"[FAILURE] {source.title()} email parser: {exc}"
+            label = "Wanna Make It" if source == "wanna_make_it" else source.title()
+            message = f"[FAILURE] {label} email parser: {exc}"
             print(message)
             status_lines.append(message)
 

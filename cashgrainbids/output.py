@@ -11,16 +11,39 @@ from .config import OUTPUT_COLUMNS
 from .processing import excel_protect
 
 
+DECISION_COLUMNS = {
+    "FX Neutral CAD Basis", "FX/Futures Adjustment",
+    "Competitor Benchmark US Basis", "Competitive CAD Basis",
+    "Recommended Max CAD Basis", "Current CAD Basis vs Recommended",
+}
+STANDARDIZATION_COLUMNS = {
+    "Standard Futures Month", "Standard Futures Price",
+    "Standardized US Basis (USD/bu)", "Basis Normalization Status",
+}
+FX_METADATA_COLUMNS = {"FX Rate", "FX Type", "FX Quote Date"}
+
+
 def format_output(df: pd.DataFrame) -> pd.DataFrame:
     """Return the exact public CSV schema with consistently formatted values."""
     out = df[[column for column in OUTPUT_COLUMNS if column in df.columns]].copy().fillna("")
-    for column in ("Basis", "Basis Change", "US Basis (USD/bu)", "US Basis Change", "Bushel Cash Price", "MT Cash Price"):
+    for column in (
+        "Basis", "Basis Change", "US Basis (USD/bu)", "US Basis Change",
+        "Bushel Cash Price", "MT Cash Price", "FX Neutral CAD Basis",
+        "FX Rate", "USD Cash Price",
+        "FX/Futures Adjustment", "Maximum Allowed US Basis",
+        "CAD Basis at USD Ceiling", "Competitor Benchmark US Basis",
+        "Allowed Competitor Premium", "Competitive US Basis Target",
+        "Competitive CAD Basis", "Recommended Max CAD Basis",
+        "Current CAD Basis vs Recommended",
+        "CAD Basis Change per +0.01 CADUSD",
+    ):
         if column not in out:
             continue
         numeric = pd.to_numeric(
             out[column].astype(str).str.replace(r"[^0-9.\-]", "", regex=True), errors="coerce"
-        ).round(2)
-        out[column] = numeric.map(lambda value: f"{value:.2f}" if pd.notna(value) else "")
+        ).round(4 if column == "FX Rate" else 2)
+        decimals = 4 if column == "FX Rate" else 2
+        out[column] = numeric.map(lambda value: f"{value:.{decimals}f}" if pd.notna(value) else "")
     if "Bushel Cash Price" in out:
         out["Bushel Cash Price"] = out["Bushel Cash Price"].map(lambda value: f"${value}" if value else "")
     if "Change" in out:
@@ -34,7 +57,17 @@ def write_daily_outputs(df: pd.DataFrame, csv_path: Path) -> tuple[Path, Path]:
     out.to_csv(csv_path, index=False, header=True, quoting=csv.QUOTE_MINIMAL, encoding="utf-8")
     xlsx_path = csv_path.with_suffix(".xlsx")
     excel_out = out.copy()
-    for column in ("Basis", "Basis Change", "US Basis (USD/bu)", "US Basis Change", "Bushel Cash Price", "MT Cash Price"):
+    for column in (
+        "Basis", "Basis Change", "US Basis (USD/bu)", "US Basis Change",
+        "Bushel Cash Price", "MT Cash Price", "FX Neutral CAD Basis",
+        "FX Rate", "USD Cash Price",
+        "FX/Futures Adjustment", "Maximum Allowed US Basis",
+        "CAD Basis at USD Ceiling", "Competitor Benchmark US Basis",
+        "Allowed Competitor Premium", "Competitive US Basis Target",
+        "Competitive CAD Basis", "Recommended Max CAD Basis",
+        "Current CAD Basis vs Recommended",
+        "CAD Basis Change per +0.01 CADUSD",
+    ):
         if column in excel_out:
             excel_out[column] = pd.to_numeric(
                 excel_out[column].astype(str).str.replace(r"[^0-9.\-]", "", regex=True), errors="coerce"
@@ -45,24 +78,50 @@ def write_daily_outputs(df: pd.DataFrame, csv_path: Path) -> tuple[Path, Path]:
         "MacEwen email bids": "MacEwen Email", "Bunge email bids": "Bunge Email",
         "Richard email bids": "Richard Email",
         "Ceresco bids": "Ceresco",
+        "Wanna Make It email bids": "Wanna Make It",
     }
     with pd.ExcelWriter(xlsx_path, engine="openpyxl") as writer:
         excel_out.to_excel(writer, index=False, sheet_name="Cash Bids")
         for source, source_df in excel_out.groupby("Source", sort=False):
-            # Keep the full public schema on every source sheet, including a
-            # blank US-basis column when that source lacks enough inputs.
+            source_name = str(source)
+            source_columns = list(excel_out.columns)
+            if source_name == "AgriCharts":
+                source_columns = [
+                    column for column in source_columns
+                    if column not in FX_METADATA_COLUMNS | STANDARDIZATION_COLUMNS | DECISION_COLUMNS
+                ]
+            elif source_name in {"Greenfield", "Ingredion"}:
+                source_columns = [
+                    column for column in source_columns
+                    if column not in DECISION_COLUMNS
+                ]
+            else:
+                source_columns = [
+                    column for column in source_columns
+                    if column not in FX_METADATA_COLUMNS | DECISION_COLUMNS
+                ]
+            source_df = source_df[source_columns]
             source_df.to_excel(
-                writer, index=False, sheet_name=sheet_names.get(str(source), str(source)[:31])
+                writer, index=False, sheet_name=sheet_names.get(source_name, source_name[:31])
             )
         for worksheet in writer.book.worksheets:
             worksheet.freeze_panes = "A2"
             worksheet.auto_filter.ref = worksheet.dimensions
             header_map = {cell.value: cell.column for cell in worksheet[1]}
-            for column in ("Basis", "Basis Change", "US Basis (USD/bu)", "US Basis Change", "MT Cash Price"):
+            for column in (
+                "Basis", "Basis Change", "US Basis (USD/bu)", "US Basis Change",
+                "MT Cash Price", "FX Neutral CAD Basis", "FX/Futures Adjustment",
+                "FX Rate", "USD Cash Price",
+                "Maximum Allowed US Basis", "CAD Basis at USD Ceiling",
+                "Competitor Benchmark US Basis", "Allowed Competitor Premium",
+                "Competitive US Basis Target", "Competitive CAD Basis",
+                "Recommended Max CAD Basis", "Current CAD Basis vs Recommended",
+                "CAD Basis Change per +0.01 CADUSD",
+            ):
                 if column in header_map:
                     for cells in worksheet.iter_cols(min_col=header_map[column], max_col=header_map[column], min_row=2):
                         for cell in cells:
-                            cell.number_format = "0.00"
+                            cell.number_format = "0.0000" if column == "FX Rate" else "0.00"
             if "Bushel Cash Price" in header_map:
                 for cells in worksheet.iter_cols(
                     min_col=header_map["Bushel Cash Price"], max_col=header_map["Bushel Cash Price"], min_row=2

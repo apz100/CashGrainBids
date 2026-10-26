@@ -3,16 +3,32 @@
 from __future__ import annotations
 
 import time
+import shutil
 from datetime import datetime
+from pathlib import Path
 
 import pandas as pd
 from playwright.sync_api import sync_playwright
 
 from email_bid_sources import collect_outlook_bid_rows
 from ceresco_bids import collect_ceresco_bids
+from basis_normalization import add_standardized_commercial_basis
 
-from .config import AGRICHARTS_TARGETS, FX_DIR, INGREDION_STORAGE_STATE, OUTPUT_DIR
-from .fx_rates import add_us_basis_from_spot
+from .config import (
+    AGRICHARTS_TARGETS, FX_DIR, INGREDION_STORAGE_STATE, OUTPUT_DIR,
+    NGG_US_BASIS_CEILINGS, NGG_COMPETITOR_PREMIUMS,
+    NGG_BENCHMARK_METHOD, NGG_SELECTED_COMPETITOR,
+)
+from .manual_dates import apply_manual_quote_dates
+from .fx_rates import (
+    add_us_basis_from_spot,
+    add_wanna_make_it_nearby_basis,
+    collect_barchart_cadusd_forward_curve,
+    collect_farmbucks_cadusd_forward_curve,
+    collect_tradingview_cadusd_forward_curve,
+    crosscheck_forward_curves,
+)
+from .pricing_decisions import add_pricing_decision_columns
 from .output import write_daily_outputs
 from .processing import (
     add_basis_change_column,
@@ -77,6 +93,25 @@ def main() -> int:
             except Exception as error:
                 print(f"[ERR] {source_name}: {error}")
             time.sleep(0.5)
+        # TradingView is primary because its contract page exposes the full
+        # deferred 6C curve. Farmbucks is collected independently for audit;
+        # only the primary curve becomes the active input.
+        tv_path = collect_tradingview_cadusd_forward_curve(page, FX_DIR)
+        farm_path = collect_farmbucks_cadusd_forward_curve(
+            page, FX_DIR, output_name="FX_Forward_Rates_Farmbucks.csv"
+        )
+        if tv_path is not None:
+            shutil.copyfile(tv_path, FX_DIR / "FX_Forward_Rates.csv")
+            if farm_path is not None:
+                crosscheck_forward_curves(
+                    FX_DIR / "FX_Forward_Rates.csv", farm_path,
+                    FX_DIR / f"FX_Crosscheck_{fetch_date}_{run_period}.csv",
+                )
+        elif farm_path is not None:
+            shutil.copyfile(farm_path, FX_DIR / "FX_Forward_Rates.csv")
+            print("[INFO] TradingView unavailable; using Farmbucks curve")
+        else:
+            print("[WARN] TradingView and Farmbucks 6C curves unavailable")
         context.close()
         browser.close()
 
@@ -96,9 +131,19 @@ def main() -> int:
         print("No data collected.")
         return 1
     out = normalize_agricharts_basis(pd.concat(rows, ignore_index=True))
+    out = apply_manual_quote_dates(out, OUTPUT_DIR.parent / "manual_quote_dates.json")
     out = filter_eastern_ontario_locations(out)
+    out = add_wanna_make_it_nearby_basis(out, fetch_date)
     out = add_us_basis_from_spot(out, fetch_date, FX_DIR)
+    out = add_standardized_commercial_basis(out)
     previous = find_previous_output_file(OUTPUT_DIR, fetch_date)
+    out = add_pricing_decision_columns(
+        out, previous,
+        ceilings=NGG_US_BASIS_CEILINGS,
+        premiums=NGG_COMPETITOR_PREMIUMS,
+        benchmark_method=NGG_BENCHMARK_METHOD,
+        selected_competitor=NGG_SELECTED_COMPETITOR,
+    )
     if previous is not None:
         out = add_basis_change_column(out, previous)
     elif "Basis" in out:
