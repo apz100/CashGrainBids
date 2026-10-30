@@ -25,6 +25,18 @@ def _num(value):
         return None
 
 
+def _futures_num(value):
+    """Parse decimal futures values and CBOT eighth notation such as 452-2."""
+    raw = str(value).strip().replace("'", "-")
+    if "-" in raw:
+        whole, eighths = raw.rsplit("-", 1)
+        try:
+            return (float(whole) + float(eighths) / 8) / 100
+        except ValueError:
+            return None
+    return _num(raw)
+
+
 def _money(value):
     n = _num(value)
     return "" if n is None else f"${n:.2f}"
@@ -143,7 +155,7 @@ def _panel_header(c, x, y, width, title, subtitle=""):
 def _table(c, x, y, width, rows, title, color):
     _panel_header(c, x, y, width, title)
     y -= 31
-    headers = ("#", "Location", "Basis", "$/bu", "$/MT")
+    headers = ("#", "Location", "CAD Basis", "$/bu", "$/MT")
     widths = (30, 210, 86, 78, 75)
     c.setFillColorRGB(*PALE_BLUE); c.rect(x, y, width, 25, fill=1, stroke=0)
     cursor = x
@@ -165,6 +177,39 @@ def _table(c, x, y, width, rows, title, color):
 def _draw_market_panel(c, x, y, width, commodity, subset, crop_label, crop_color):
     subset = subset.copy()
     subset["_cash"] = subset.get("Bushel Cash Price", pd.Series(index=subset.index)).map(_num)
+    wmi_mask = subset["Source"].astype(str).str.contains("wanna make it", case=False, na=False)
+    if commodity in {"Corn", "Soybeans"} and wmi_mask.any():
+        factor = 39.3683 if commodity == "Corn" else 36.7437
+        wmi_mt = pd.to_numeric(subset.loc[wmi_mask, "MT Cash Price"], errors="coerce")
+        subset.loc[wmi_mask, "_cash"] = wmi_mt / factor
+    # Keep WMI's basis calculated from the email futures value, then mark the
+    # WMI flat price to the AgriCharts futures reference used by the elevator
+    # quotes. This makes WMI economically comparable without overwriting the
+    # original quote in the raw data.
+    display_reference = pd.Series(dtype=float)
+    wmi_rows = subset[wmi_mask]
+    elevator_rows = subset[~subset.index.isin(wmi_rows.index)]
+    # AgriCharts is the designated common elevator futures reference. Do not
+    # accidentally select a Great Lakes/Embrun quote that is priced against
+    # a different contract month.
+    agri_rows = elevator_rows[elevator_rows["Source"].astype(str).str.contains("agricharts", case=False, na=False)]
+    reference_rows = agri_rows if not agri_rows.empty else elevator_rows
+    display_reference = reference_rows.get("Futures Price", pd.Series(index=reference_rows.index)).map(_futures_num).dropna()
+    subset["_display_basis"] = pd.to_numeric(subset.get("Basis", pd.Series(index=subset.index)), errors="coerce")
+    email_basis = pd.to_numeric(wmi_rows.get("Email Futures Price", pd.Series(index=wmi_rows.index)), errors="coerce")
+    if not email_basis.dropna().empty:
+        subset.loc[wmi_rows.index, "_display_basis"] = subset.loc[wmi_rows.index, "_cash"] - email_basis
+    subset["_display_cash"] = subset["_cash"]
+    subset["_display_mt"] = pd.to_numeric(subset.get("MT Cash Price", pd.Series(index=subset.index)), errors="coerce")
+    if not display_reference.empty and not wmi_rows.empty:
+        common_futures = float(display_reference.iloc[0])
+        wmi_basis = pd.to_numeric(wmi_rows.get("Basis", pd.Series(index=wmi_rows.index)), errors="coerce")
+        adjusted_cash = wmi_basis + common_futures
+        factor = 39.3683 if commodity == "Corn" else 36.7437 if commodity == "Soybeans" else None
+        subset.loc[wmi_rows.index, "_display_cash"] = adjusted_cash
+        if factor is not None:
+            subset.loc[wmi_rows.index, "_display_mt"] = adjusted_cash * factor
+    subset["_cash"] = subset["_display_cash"]
     farm_reference = subset[subset.get("Bid Type", pd.Series("", index=subset.index)).astype(str).str.lower().eq("fob farm")].copy()
     ranked_subset = subset[~subset.index.isin(farm_reference.index)].copy()
     if commodity in {"Corn", "Soybeans"} and not farm_reference.empty:
@@ -180,7 +225,7 @@ def _draw_market_panel(c, x, y, width, commodity, subset, crop_label, crop_color
     c.setFillColorRGB(*crop_color); c.rect(x, y, width, 26, fill=1, stroke=0)
     _text(c, x + 10, y + 8, commodity.upper(), 12, True)
     y -= 26
-    headers = ("#", "Location", "Basis", "$/bu", "$/MT")
+    headers = ("#", "Location", "CAD Basis", "$/bu", "$/MT")
     widths = (30, 210, 86, 78, 75)
     c.setFillColorRGB(*PALE_BLUE); c.rect(x, y, width, 25, fill=1, stroke=0)
     cursor = x
@@ -208,7 +253,7 @@ def _draw_market_panel(c, x, y, width, commodity, subset, crop_label, crop_color
         c.setFillColorRGB(*(1, 1, 1) if len(locations) % 2 else PALE_YELLOW); c.rect(x, y, width, 26, fill=1, stroke=0)
         c.setStrokeColorRGB(0.83, 0.87, 0.90); c.line(x, y, x + width, y)
         row = group.iloc[0]
-        vals = (location_number, location, _basis(row.get("Basis")), _money(row.get("Bushel Cash Price")), _money(row.get("MT Cash Price")))
+        vals = (location_number, location, _basis(row.get("_display_basis")), _money(row.get("_display_cash")), _money(row.get("_display_mt")))
         cursor = x
         for val, w in zip(vals, widths):
             _center(c, cursor, y + 8, w, val, 11, False); cursor += w
@@ -217,7 +262,7 @@ def _draw_market_panel(c, x, y, width, commodity, subset, crop_label, crop_color
         row = farm_reference.sort_values("Delivery", key=lambda values: values.map(_delivery_sort_key)).iloc[0]
         c.setFillColorRGB(*(0.91, 0.96, 0.84)); c.rect(x, y, width, 26, fill=1, stroke=0)
         c.setStrokeColorRGB(0.83, 0.87, 0.90); c.line(x, y, x + width, y)
-        vals = ("", "Wanna Make It (FOB Farm)", _basis(row.get("Basis")), _money(row.get("Bushel Cash Price")), _money(row.get("MT Cash Price")))
+        vals = ("", "Wanna Make It (FOB Farm)", _basis(row.get("_display_basis")), _money(row.get("_display_cash")), _money(row.get("_display_mt")))
         cursor = x
         for val, w in zip(vals, widths):
             _center(c, cursor, y + 8, w, val, 10, False); cursor += w
@@ -235,6 +280,10 @@ def build_fixed_pdf(frame: pd.DataFrame, report_date: str, output_path: Path) ->
         report_dt = datetime.now()
     report_year = str(report_dt.year)
     nearby_month = report_dt.strftime("%b")
+    next_month_date = report_dt.replace(day=28) + pd.Timedelta(days=4)
+    next_month_date = next_month_date.replace(day=1)
+    next_nearby_month = next_month_date.strftime("%b")
+    next_nearby_year = str(next_month_date.year)
     frame["Category"] = frame.apply(
         lambda r: (
             "Elevator"
@@ -269,7 +318,7 @@ def build_fixed_pdf(frame: pd.DataFrame, report_date: str, output_path: Path) ->
         _text(canvas, 16, 581, f"NORTH GOWER GRAINS - {commodity.upper()} BASIS MARKET POSITION", 24, True)
         _text(canvas, 897, 593, report_date, 10, False, (0.35, 0.42, 0.48))
         canvas.setStrokeColorRGB(*GOLD); canvas.setLineWidth(2); canvas.line(16, 555, 992, 555)
-        _text(canvas, 16, 565, "Competitor elevator bids ranked separately from potential resale destinations. Basis shown in $/bu.", 10, False, (0.35, 0.42, 0.48))
+        _text(canvas, 16, 565, "Competitor elevator bids ranked separately from potential resale destinations. CAD Basis shown in $/bu.", 10, False, (0.35, 0.42, 0.48))
         if commodity == "Wheat":
             for panel_index, (panel_type, panel_color) in enumerate(panel_types):
                 subset = frame[frame["_type"].eq(panel_type)]
@@ -293,6 +342,8 @@ def build_fixed_pdf(frame: pd.DataFrame, report_date: str, output_path: Path) ->
                 nearby_labels = [f"{nearby_month} {report_year}", nearby_month]
                 if panel_type == "Corn":
                     nearby_labels.append(f"Harvest {report_year}")
+                else:
+                    nearby_labels.extend([f"{next_nearby_month} {next_nearby_year}", next_nearby_month])
                 nearby_pattern = "|".join(re.escape(label) for label in nearby_labels)
                 wmi_nearby_elevator = raw_frame[
                     raw_frame["Source"].astype(str).str.contains("wanna make it", case=False, na=False)
@@ -307,7 +358,9 @@ def build_fixed_pdf(frame: pd.DataFrame, report_date: str, output_path: Path) ->
                     & raw_frame["Delivery"].astype(str).str.contains(nearby_pattern, case=False, na=False, regex=True)
                 ].copy()
                 if not farm.empty and wmi_nearby_elevator.empty:
-                    old = pd.concat([old, farm.sort_values("Delivery", key=lambda values: values.map(_delivery_sort_key)).head(1)], ignore_index=True)
+                    current_farm = farm[farm["Delivery"].astype(str).str.fullmatch(rf"{re.escape(nearby_month)}(?:\s+{report_year})?", case=False, na=False)]
+                    selected_farm = current_farm if not current_farm.empty else farm
+                    old = pd.concat([old, selected_farm.sort_values("Delivery", key=lambda values: values.map(_delivery_sort_key)).head(1)], ignore_index=True)
             chosen = old if col == 0 else new
             _draw_market_panel(canvas, x, 504, 479, panel_type, chosen, ("2026 NEW CROP - " if col == 0 else "2027 NEW CROP - ") + panel_type.upper(), panel_color)
         canvas.setFillColorRGB(*PALE_BLUE); canvas.rect(16, 11, 976, 27, fill=1, stroke=0)

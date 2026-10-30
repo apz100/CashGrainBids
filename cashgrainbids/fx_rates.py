@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import html
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from urllib.request import Request, urlopen
 
@@ -327,6 +327,10 @@ def add_wanna_make_it_nearby_basis(df: pd.DataFrame, fetch_date: str) -> pd.Data
         return out
     nearby_delivery = current.strftime("%b %Y")
     nearby_month = current.strftime("%b")
+    next_month_date = current.replace(day=28) + timedelta(days=4)
+    next_month_date = next_month_date.replace(day=1)
+    next_nearby_delivery = next_month_date.strftime("%b %Y")
+    next_nearby_month = next_month_date.strftime("%b")
     source_mask = out["Source"].astype(str).str.lower().eq("agricharts")
     wmi_mask = out["Source"].astype(str).str.lower().eq("wanna make it email bids")
     out["Futures Month"] = out["Futures Month"].astype(object)
@@ -352,9 +356,16 @@ def add_wanna_make_it_nearby_basis(df: pd.DataFrame, fetch_date: str) -> pd.Data
                 case=False, na=False,
             )
         else:
-            nearby_mask = out["Delivery"].astype(str).str.fullmatch(
+            current_mask = out["Delivery"].astype(str).str.fullmatch(
                 rf"{re.escape(nearby_month)}(?:\s+{current.year})?", case=False, na=False
             )
+            next_mask = out["Delivery"].astype(str).str.fullmatch(
+                rf"{re.escape(next_nearby_month)}(?:\s+{next_month_date.year})?", case=False, na=False
+            )
+            soybean_wmi = wmi_mask & out["Name"].astype(str).str.fullmatch(commodity, case=False, na=False)
+            nearby_mask = current_mask
+            if commodity == "Soybeans" and not (soybean_wmi & current_mask).any():
+                nearby_mask = next_mask
         target = wmi_mask & out["Name"].astype(str).str.fullmatch(commodity, case=False, na=False) & nearby_mask
         if not target.any():
             continue

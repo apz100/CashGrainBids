@@ -36,6 +36,16 @@ class CashBidsRegressionTests(unittest.TestCase):
         text = "Nearby futures of corn trading at $4.52; soybeans at $12.35 and wheat is at $6.24 USD per bushel."
         self.assertEqual(parse_wanna_make_it_nearby_futures(text), {"Corn": 4.52, "Soybeans": 12.35, "SRW": 6.24})
 
+    def test_broadgrain_ocr_keeps_srw_rows_when_heading_is_missing(self):
+        text = """Del - Johnstown Aug / Sept 26
+Del - Johnstown July /Aug-27 $ 1.71 6.2200 WN7 $ 7.93 $ 291.37
+Del - Mississauga JFM - 27 $ 1.69 6.0900 WH7 $ 7.78 $ 285.86
+Del - Mississauga AM-27 $ 1.68 6.1600 WK7 $ 7.84 $ 288.07"""
+        result = parse_broadgrain_ocr(text)
+        self.assertEqual(len(result), 1)
+        self.assertTrue((result["Name"] == "SRW Wheat").all())
+        self.assertAlmostEqual(float(result.iloc[0]["Basis"]), 1.71)
+
     def test_wmi_futures_verification_accepts_unknown_delay(self):
         quotes = pd.DataFrame([
             {"Timestamp": "2026-10-22 09:53:00", "Contract": "SX26", "Price": 12.35},

@@ -618,6 +618,14 @@ _BROADGRAIN_ROW_RE = re.compile(
     re.I,
 )
 
+_BROADGRAIN_WHEAT_ROW_RE = re.compile(
+    r"(?P<delivery>(?:[A-Za-z]{3,9}\s*/\s*[A-Za-z]{3,9}|JFM|AM)\s*-?\s*\d{2,4})\D+"
+    r"(?P<basis>[+-]?\d+(?:\.\d+)?)\D+(?P<futures>\d+(?:\.\d+)?)\D+"
+    r"(?P<contract>W[A-Za-z]?\d{1,2})\D+(?P<cash>\d+(?:\.\d+)?)\D+"
+    r"(?P<mt>\d+\.\d+)",
+    re.I,
+)
+
 
 def _ocr_futures(value: str) -> str:
     number = _number(value)
@@ -647,6 +655,8 @@ def parse_broadgrain_ocr(text: str) -> pd.DataFrame:
         elif "wheat - hrs" in lower:
             commodity = "HRS Wheat"
         match = _BROADGRAIN_ROW_RE.search(line)
+        if not match:
+            match = _BROADGRAIN_WHEAT_ROW_RE.search(line)
         location_context = line[:match.start()] if match else line
         location_match = re.search(
             r"(?:del\s*-?\s*)([A-Za-z]+(?:[ /.-][A-Za-z]+)*)", line, re.I
@@ -665,18 +675,32 @@ def parse_broadgrain_ocr(text: str) -> pd.DataFrame:
             location = f"BroadGrain {location_name.title()}"
         elif "brinston" in lower:
             location = "BroadGrain Brinston"
-        if not match or not commodity:
+        if not match:
             continue
         values = match.groupdict()
         contract = values["contract"].upper().rstrip("~)]")
+        # OCR can miss the printed Wheat - SRW section heading. WN/WH/WK
+        # contracts are enough to retain the row as SRW when no heading was
+        # recognized; explicit HRW/HRS headings still take precedence.
+        if not commodity and contract.startswith("W"):
+            commodity = "SRW Wheat"
+        if not commodity:
+            continue
         row_commodity = (
             "Soybeans" if contract.startswith("S") else
             "Corn" if contract.startswith("C") else
             "SRW Wheat" if contract.startswith("W") else commodity
         )
+        if row_commodity in {"SRW Wheat", "HRW Wheat", "HRS Wheat"} and not re.search(
+            r"johnstown|picton", location, re.I
+        ):
+            continue
         row = _row_from_mt(
-            "BroadGrain email bids", location, row_commodity, values["delivery"],
-            contract, _ocr_futures(values["futures"]), values["basis"], values["mt"],
+            "BroadGrain email bids", location, row_commodity,
+            re.sub(r"\s*/\s*", "-", re.sub(r"\s*-\s*", "-", values["delivery"])),
+            contract, _ocr_futures(values["futures"]),
+            (f"{float(values['basis']) / 100:.2f}" if contract.startswith("W") and float(values["basis"]) > 10 else values["basis"]),
+            values["mt"],
         )
         if row is not None:
             rows.append(row)
